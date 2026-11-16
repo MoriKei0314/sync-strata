@@ -332,6 +332,15 @@ def make_config(pick, engine, extra_env, context=None):
     if "--expert-profile" in args and (H.effective().get("expert_learning") or "off") == "on":
         c["expert_profile_save"] = learned_profile(pick["id"])
         c["expert_profile_save_every"] = 10
+    # 11/16 夜 本人の決定（エンジン 1 の切り分け）: 取り出しの値を送らない依頼（dsh は温度も送らない＝greedy）に，
+    # 繰り返しの罰則の既定を入れる．dsh の長い文脈＋greedy＋R4 で名詞の並びが輪に落ちた（同じ文 101 回・思考 51,000 字）のが，
+    # repetition 1.05（直前 256）で消え，decode は揺れの内．依頼が自分の値を送れば，そちらが勝つ（server.py sampling_defaults_from_config）
+    # モデルごとの強さ（11/16 20:2x: Sync-XS は 1.05 で効ききらず，1.10 を試して決める．決まるまでは全部 1.05）
+    REP_PENALTY = {"sync-xs": 1.05, "sync-s": 1.05, "sync-m": 1.05}
+    samp = dict(c.get("sampling") or {})
+    samp.setdefault("repetition_penalty", REP_PENALTY.get(pick["id"], 1.05))
+    samp.setdefault("penalty_last_n", 256)
+    c["sampling"] = samp
 
     path = f"{ROOT}/cfg/auto.json"
     json.dump(c, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)

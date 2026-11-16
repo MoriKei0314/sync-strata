@@ -19,6 +19,7 @@ const Md = (() => {
   const isTableRow = (l) => /^\s*\|.*\|\s*$/.test(l);
   const isRule = (l) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
   const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => inline(c.trim()));
+  const LI = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;   // 一覧の項目の行（字下げ・印・本文）
 
   // marks (11/15, optional): gets the line number where each top-level block starts (used by stream below; the output is the same)
   function render(src, marks) {
@@ -53,21 +54,48 @@ const Md = (() => {
           tb.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
         continue;
       }
-      const item = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      const item = line.match(LI);
       if (item) {
         const ordered = /\d/.test(item[2]);
         const items = [];
         while (i < lines.length) {
-          const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+          const m = lines[i].match(LI);
           if (m) {
-            items.push({ depth: Math.floor(m[1].length / 2), text: m[3] });
+            items.push({ depth: Math.floor(m[1].length / 2), mark: m[2], paras: [m[3]] });
             i++;
           } else if (lines[i].trim() && /^\s{2,}/.test(lines[i]) && items.length) {
-            items[items.length - 1].text += " " + lines[i++].trim();
+            const ps = items[items.length - 1].paras;
+            ps[ps.length - 1] += " " + lines[i++].trim();
+          } else if (!lines[i].trim() && items.length) {
+            // 11/16: 空行をはさんだ一覧（CommonMark の loose list）も 1 つの一覧に．前は空行で一覧を閉じ，次の項目が
+            // 新しい <ol> になって番号が毎回 1 から振り直された（「1. 1. 1.」の表示）．次の空でない行が，同じ種類の項目か
+            // 字下げした子の項目なら一覧を続け，字下げした続きの文（コードの囲みでない）なら最後の項目の次の段落にする
+            let j = i;
+            while (j < lines.length && !lines[j].trim()) j++;
+            const n = j < lines.length ? lines[j].match(LI) : null;
+            if (n && (Math.floor(n[1].length / 2) > 0 || /\d/.test(n[2]) === ordered)) { i = j; continue; }
+            if (!n && j < lines.length && /^\s{2,}/.test(lines[j]) && !/^\s*(```|~~~)/.test(lines[j])) {
+              items[items.length - 1].paras.push(lines[j].trim());
+              i = j + 1;
+              continue;
+            }
+            break;
           } else break;
         }
         const tag = ordered ? "ol" : "ul";
-        out.push(`<${tag}>${items.map((it) => `<li class="d${Math.min(it.depth, 3)}">${inline(it.text)}</li>`).join("")}</${tag}>`);
+        // 11/16: 番号は書かれた数から数える（CommonMark と同じく，同じ深さの最初の項目の数から 1 ずつ）．<li value> で
+        // 決めるので，<ol> の中に入れた子の項目（同じ <ol> の <li> として平らに並べている）で親の番号がずれることもない
+        const cnt = [];
+        out.push(`<${tag}>${items.map((it) => {
+          cnt.length = it.depth + 1;
+          let attr = "";
+          let cls = `d${Math.min(it.depth, 3)}`;
+          if (/\d/.test(it.mark)) {
+            cnt[it.depth] = cnt[it.depth] === undefined ? parseInt(it.mark, 10) : cnt[it.depth] + 1;
+            if (ordered) attr = ` value="${cnt[it.depth]}"`;
+          } else if (ordered) cls += " b";
+          return `<li class="${cls}"${attr}>${it.paras.map(inline).join("<br>")}</li>`;
+        }).join("")}</${tag}>`);
         continue;
       }
       if (/^\s*>/.test(line)) {
@@ -113,7 +141,10 @@ const Md = (() => {
       const marks = [];
       let html = render(rest, marks);
       let k = 0;
-      for (let j = marks.length - 1; j > 0; j--) if (!lines[marks[j] - 1].trim()) { k = marks[j]; break; }
+      // 11/16: 書き途中の最後の行が一覧の印の書きかけ（「2」「2.」「-」）なら，そこでは切らない（前の一覧が空行の後も続く
+      // ことがあるので，先に確定させると番号が分かれる．印が書き終わってから描き分ける）
+      const partial = (j) => marks[j] === lines.length - 1 && /^\s*(\d{1,9}[.)]?|[-*+])\s*$/.test(lines[marks[j]]);
+      for (let j = marks.length - 1; j > 0; j--) if (!lines[marks[j] - 1].trim() && !partial(j)) { k = marks[j]; break; }
       for (; tailN > 0 && el.lastChild; tailN--) el.lastChild.remove();
       tailN = 0;
       if (k) {

@@ -206,13 +206,36 @@ function ChatView(go, sessionId, subInfo) {
   let tools = new Map(); // callId -> {el, status, result}
   let evlog = []; // the durable events shown so far, oldest first (会話をコピー starts from these and reads older pages)
 
-  const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
-  const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
+  const gap = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  const nearBottom = () => gap() < 140;
+  // 11/16: 下に付いていくかどうかは「本人が上へ動かしたか」で決める（前は描くたびに「下から 140px 以内か」で決めていたので，
+  // 考え中などにスマホで少し上へ引くと，次のコマでいちばん下へ引き戻され，指と取り合ってガクガクした）．
+  // 指が触れている間・指を離した後の慣性の間・ホイールやキーで上へ動かした時は「付いていかない」にし，
+  // 本人がいちばん下（48px 以内）まで戻すか，↓の印・自分の発言でいちばん下へ行ったら，また付いていく．
+  let sticky = true;      // 下に付いていく（follow() は会話の購読なので別の名前）
+  let touching = false;
+  let gestureUntil = 0;   // この時刻までの動きは本人の操作（慣性・ホイール・キー）
+  let lastTop = 0;
+  const toBottom = () => { sticky = true; scroller.scrollTop = scroller.scrollHeight; };
   function keepBottom(fn) {
-    const stick = nearBottom();
+    const stick = sticky && !touching;
     fn();
     if (stick) toBottom();
   }
+  const gesture = (ms) => { gestureUntil = Math.max(gestureUntil, performance.now() + ms); };
+  scroller.addEventListener("touchstart", () => { touching = true; }, { passive: true });
+  const release = () => { touching = false; gesture(1200); };
+  scroller.addEventListener("touchend", release, { passive: true });
+  scroller.addEventListener("touchcancel", release, { passive: true });
+  scroller.addEventListener("wheel", (e) => { gesture(400); if (e.deltaY < 0) sticky = false; }, { passive: true });
+  scroller.addEventListener("keydown", (e) => { if (/^(PageUp|ArrowUp|Home)$/.test(e.key)) { gesture(600); sticky = false; } });
+  scroller.addEventListener("scroll", () => {
+    const top = scroller.scrollTop;
+    const byUser = touching || performance.now() < gestureUntil;
+    if (byUser && top < lastTop - 1) sticky = false;
+    if (gap() <= 48) sticky = true;
+    lastTop = top;
+  }, { passive: true });
 
   // --- building transcript entries ---
   function toolEntry(id, name, args) {
@@ -435,7 +458,7 @@ function ChatView(go, sessionId, subInfo) {
   // 実測（この PC の画面は 240Hz: requestAnimationFrame が毎秒 240 回）: 毎コマだと 1 秒 240 回描くので，最短の間隔を 15 ms（約 60fps）にする．
   // 文字の増え方は 60fps あれば目で見て滑らか．スマホ（指で触る機器）は今までどおり届くたび．
   // 11/16 係 G2: 既定は 15 ms．測りのときは fx.js の SyncFps（localStorage syncFps {"text":60|120|240|0} か ?textfps=）で替えられる（0 は毎コマ）．
-  const LIVE_MS_PC = typeof SyncFps !== "undefined" ? SyncFps.textMs : 15;
+  const LIVE_MS_PC = typeof SyncFps !== "undefined" ? SyncFps.textMs : 0;   // 11/16 夜: 既定は毎コマ（届いた時だけ描く）
   const livePc = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(hover: hover) and (pointer: fine)") : null;
   const liveMs = () => (livePc && livePc.matches ? LIVE_MS_PC : 0);
   function scheduleLive() {
@@ -466,7 +489,7 @@ function ChatView(go, sessionId, subInfo) {
         const rb = live.rbody;
         const atEnd = rb.scrollTop + rb.clientHeight >= rb.scrollHeight - 16;
         rb.textContent = live.rtext;
-        if (atEnd) rb.scrollTop = rb.scrollHeight;
+        if (atEnd && !touching) rb.scrollTop = rb.scrollHeight;   // 11/16: 指が触れている間は動かさない（指と取り合わない）
       }
       live.md.update(live.text, full);
     });
@@ -806,7 +829,7 @@ function ChatView(go, sessionId, subInfo) {
   }
 
   scroller.addEventListener("scroll", () => jump.classList.toggle("hidden", nearBottom()));
-  jump.addEventListener("click", () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" }));
+  jump.addEventListener("click", () => { sticky = true; scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" }); });
 
   const off = Store.on((topic, id) => {
     if (topic === "reconnected") follow();

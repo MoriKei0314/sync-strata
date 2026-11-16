@@ -30,7 +30,9 @@ const SyncFps = (() => {
     if (!Number.isFinite(n) || n < 0) return def;
     return n === 0 ? 0 : Math.max(0, Math.round(1000 / n - 2));
   };
-  return { textMs: ms(o.text, 15), fxMs: ms(o.fx, 15), raw: o };
+  // 11/16 夜 本人の決定: 文字の流しの既定は画面のリフレッシュレートまで（0＝届いたら次のコマで描く．描くのは新しい字が
+  // 届いた時だけなので，回数の上限はエンジンの窓の数＝約 45 回/秒で，60 との差は小さい見込み）．飾りの時計は約 60fps のまま
+  return { textMs: ms(o.text, 0), fxMs: ms(o.fx, 15), raw: o };
 })();
 
 (() => {

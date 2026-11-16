@@ -15,7 +15,7 @@
    },
    "hf": {
     "repo": "hiru2005/Sync-XS",
-    "revision": "",
+    "revision": "7caf39170ffd473ec37ffc15e853ba9b79f55648",
     "repo_type": "model"
    },
    "files": [
@@ -92,7 +92,7 @@
    },
    "hf": {
     "repo": "hiru2005/Sync-S",
-    "revision": "",
+    "revision": "f0674698fbb224ec581227228befb59335043aec",
     "repo_type": "model"
    },
    "files": [
@@ -171,7 +171,7 @@
    },
    "hf": {
     "repo": "sync-strata/Sync-M",
-    "revision": "",
+    "revision": "435b4178227d9fb13b7e63f8645b7213819419a2",
     "repo_type": "model"
    },
    "files": [
@@ -247,7 +247,7 @@
    ],
    "hf": {
     "repo": "hiru2005/Sync-shared",
-    "revision": "",
+    "revision": "5aabe39c669208e8ae0c6ecad8e9d34f808c8d02",
     "repo_type": "model"
    },
    "local_dir": ".",
@@ -267,7 +267,7 @@
    ],
    "hf": {
     "repo": "hiru2005/Sync-shared",
-    "revision": "",
+    "revision": "5aabe39c669208e8ae0c6ecad8e9d34f808c8d02",
     "repo_type": "model"
    },
    "local_dir": ".",
@@ -302,7 +302,7 @@
    ],
    "hf": {
     "repo": "hiru2005/Sync-shared",
-    "revision": "",
+    "revision": "5aabe39c669208e8ae0c6ecad8e9d34f808c8d02",
     "repo_type": "model"
    },
    "local_dir": ".",
