@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "同梱の画面（起動中・閉じるときの 4 択・状態）だけに IPC を許す．会話の画面（http://127.0.0.1:…）には許さない．",
+  "windows": ["main", "close", "status"],
+  "permissions": ["core:default"]
+}

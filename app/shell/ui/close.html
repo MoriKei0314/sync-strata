@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync-Strata を閉じる</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="dialog">
+  <h1>どこまで閉じますか</h1>
+  <button class="option" data-choice="gui"><span class="title">GUI のみを閉じる</span><span class="note">エンジンと dsh は動き続けます．スマホや API からそのまま使えます</span></button>
+  <button class="option" data-choice="dsh"><span class="title">GUI と dsh を閉じる（リモートコントロール接続も切れます）</span><span class="note">エンジンと API は動き続けます</span></button>
+  <button class="option danger" data-choice="all"><span class="title">全て閉じる（リモートコントロール接続および API が切れます）</span><span class="note">エンジンも止めて終わります</span></button>
+  <button class="option cancel" data-choice="cancel"><span class="title">キャンセル（閉じない）</span></button>
+  <div id="busy" class="busy hidden"><span class="dot"></span><span>止めています…</span></div>
+  <div id="error" class="error hidden"></div>
+</main>
+<script src="close.js"></script>
+</body>
+</html>

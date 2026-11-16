@@ -1,0 +1,73 @@
+# Sync-Strata の配布用の dsh の設定（setup が SYNC_HOME\dsh-home\profiles\web\ に，無いときだけ置く．ある物は触らない）．
+# - 提供元 strata は，このアプリの会話の中継（既定 127.0.0.1:8081）を通してエンジンにつなぐ．鍵は環境変数 STRATA_API_KEY
+#   （起動の道具が設定する．このファイルには書かない）．
+# - モデル strata-r10・r7〜r4: 中身は同じエンジンで，中継がモデル名 strata-r<R> を見て，その要求だけ tail skip の順位を R にする．
+#   R が小さいほど速く，答えの質が下がる（R7 いつもの精度，R4 速さ優先．コード書きは R6 以上を勧める）．
+# - contextWindow はエンジンの文脈長以下にする（ここは 262144 のとき）．エンジンを短い文脈で動かすときはここも下げる．
+# - streamIdleTimeoutMs: 中継はエンジンを 1 件ずつ使うので，子を何本も出すと前の要求の後ろで長く待つ．3 時間にしておく．
+- id: llm-pi-ai
+  config:
+    providers:
+      strata:
+        displayName: Sync-Strata (local)
+        apiKeyEnv: STRATA_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:8081/v1
+        streamIdleTimeoutMs: 10800000
+        models:
+          # 2026-11-16 本人の実機チェック「R4・R7・R10 の 3 択」: R10＝省かない（会話の中継が strata-r10 を tail_skip 0 に読み替える）．
+          - id: strata-r10
+            name: Qwen3.8 Flash-Next (Sync-Strata, R10・Tail-Skip オフ)
+            contextWindow: 262144
+            maxTokens: 65536
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
+          - id: strata-r7
+            name: Qwen3.8 Flash-Next (Sync-Strata, R7・いつもの精度)
+            contextWindow: 262144
+            maxTokens: 65536
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
+          - id: strata-r6
+            name: Qwen3.8 Flash-Next (Sync-Strata, R6)
+            contextWindow: 262144
+            maxTokens: 65536
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
+          - id: strata-r5
+            name: Qwen3.8 Flash-Next (Sync-Strata, R5)
+            contextWindow: 262144
+            maxTokens: 65536
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
+          - id: strata-r4
+            name: Qwen3.8 Flash-Next (Sync-Strata, R4・速さ優先)
+            contextWindow: 262144
+            maxTokens: 65536
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
+- id: agent-default-model
+  config:
+    provider: strata
+    model: strata-r7
+    reasoningEffort: low

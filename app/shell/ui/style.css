@@ -1,0 +1,78 @@
+/* Sync-Strata の枠の画面（起動中・閉じるときの 4 択・状態）．色と部品の形は会話の画面（mobile/public/app.css）に合わせる．
+   動く物は transform・opacity だけ（合成器が回す）．連続の動きは steps で約 60 コマ/秒に揃える（240Hz の画面で毎コマ描かない）．JS は毎コマ style を書かない． */
+:root {
+  --bg: #14171d;
+  --panel: #171a20;
+  --panel-2: #1e2128;
+  --line: rgba(255, 255, 255, 0.10);
+  --text: #f1ede6;
+  --muted: #bab4aa;
+  --accent: #ecd3a3;
+  --accent-ink: #14171d;
+  --ok: #6cc08f;
+  --warn: #e0893a;
+  --bad: #c94a42;
+  --radius: 22px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* 日本語のフォントが無い PC（WSL など）では，同梱の Zen Kaku Gothic New（太字．会話の画面と同じ物）で描く． */
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, "Zen Kaku Gothic New", sans-serif;
+  color-scheme: dark;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New"; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: local("Zen Kaku Gothic New Bold"), local("ZenKakuGothicNew-Bold"), url("ZenKakuGothicNew-Bold.ttf") format("truetype");
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { font-size: 14.5px; user-select: none; -webkit-user-select: none; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+/* 起動中 */
+.boot { height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.boot-card { width: min(520px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px 26px 22px; animation: rise-in 0.3s var(--ease) both; }
+.brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 19px; }
+.mark { width: 44px; height: 44px; border-radius: 14px; background: rgba(236, 211, 163, 0.14); color: var(--accent); display: flex; align-items: center; justify-content: center; flex: none; }
+.mark svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; margin-top: 16px; }
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s steps(36, end) infinite; will-change: opacity; }
+.pill.bad .dot { background: var(--bad); animation: none; }
+.pill.ok .dot { background: var(--ok); animation: none; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.steps { list-style: none; margin: 16px 0 0; padding: 12px 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 14px; font-size: 12.5px; line-height: 1.7; max-height: 220px; overflow-y: auto; }
+.steps li { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps li:last-child { color: var(--text); }
+.error { margin-top: 14px; padding: 10px 13px; border-radius: 13px; background: rgba(201, 74, 66, 0.14); color: #e8867f; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+.btn { padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 13.5px; transition: transform 0.15s var(--ease), opacity 0.2s; }
+.btn:active:not(:disabled) { transform: scale(0.95); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.ghost { background: var(--panel-2); border: 1px solid var(--line); }
+.row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+/* 閉じるときの 4 択 */
+.dialog { height: 100%; display: flex; flex-direction: column; padding: 20px 18px 16px; gap: 8px; }
+.dialog h1 { font-size: 16px; margin: 2px 4px 6px; }
+.option { display: block; width: 100%; text-align: left; padding: 12px 15px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); font-size: 13.5px; line-height: 1.45; transition: transform 0.15s var(--ease); }
+.option:hover:not(:disabled) { border-color: rgba(236, 211, 163, 0.45); background: var(--panel-2); }
+.option:active:not(:disabled) { transform: scale(0.98); }
+.option .note { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.option.danger .title { color: #e8867f; }
+.option.cancel { text-align: center; background: none; }
+.busy { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--accent); margin: 2px 4px; }
+.busy .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s steps(36, end) infinite; will-change: opacity; }
+
+/* 状態 */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin-top: 14px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.up { color: var(--ok); }
+.down { color: var(--muted); }
+
+/* 画面が隠れている間は動かさない（合成器の仕事も止める）． */
+:root.paused *, :root.paused *::before, :root.paused *::after { animation-play-state: paused !important; }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

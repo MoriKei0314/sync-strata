@@ -1,0 +1,20 @@
+/* 11/15 係 R: "Phone connection" in the start settings (remote.js). Colours and sizes from app.css. */
+.remote-box { margin-top: 4px; }
+.remote-qr { width: min(280px, 72vw); margin: 10px auto 4px; padding: 10px; border-radius: 16px; background: #fff; transition: opacity 0.2s; }
+.remote-qr:empty { display: none; }
+.remote-qr svg { display: block; width: 100%; height: auto; }
+.remote-qr.used { opacity: 0.25; }
+.remote-center { text-align: center; }
+.remote-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 6px 0 10px; }
+.remote-url { margin: 2px 0 10px; text-align: center; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; color: var(--accent); word-break: break-all; }
+.remote-ok { color: var(--ok) !important; }
+.remote-state { cursor: default; }
+
+/* 11/16: a phone's login (30 days) — the band on the phone and the list of phones on the PC */
+.device-warn { position: sticky; top: 0; z-index: 50; padding: 8px 14px; font-size: 13px; text-align: center; color: #1b1300; background: var(--warn, #f2c94c); }
+.device-list { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px; }
+.device-item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px; border-radius: 12px; background: var(--card, rgba(255,255,255,0.04)); }
+.device-name { font-weight: 600; }
+.device-meta { font-size: 12px; }
+.device-left.warn { color: var(--warn, #f2c94c); }
+.device-left.bad { color: var(--bad, #e5484d); }

@@ -1,0 +1,590 @@
+{
+ "note": "Template. Replace <your-path> with where the parts live on your build machine. Original note: 部品の元の置き場（作者の PC．組み立てる build_pack.py が読む．配布物には入らない）．版を上げたら version を直す．shell・launcher・chat は係 T・S の物ができたら置き場を直す（optional: まだ無ければ飛ばす）．",
+ "release": "0.1.0-1115",
+ "update_feed": "https://github.com/{github_account}/sync-strata/releases/latest/download",
+ "shortcuts": [
+  {
+   "name": "Sync-Strata",
+   "target": "app/shell/Sync-Strata.exe",
+   "where": [
+    "desktop",
+    "startmenu"
+   ],
+   "description": "Sync-Strata（ローカルの LLM）"
+  },
+  {
+   "name": "Sync-Strata の更新",
+   "target": "update.cmd",
+   "where": [
+    "startmenu"
+   ]
+  },
+  {
+   "name": "Sync-Strata を前の版に戻す",
+   "target": "rollback.cmd",
+   "where": [
+    "startmenu"
+   ]
+  },
+  {
+   "name": "Sync-Strata を消す",
+   "target": "uninstall.cmd",
+   "where": [
+    "startmenu"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "pack",
+   "name": "配布の道具（setup・update・uninstall と dsh の設定のひな形）",
+   "version": "0.1.0",
+   "from": [
+    {
+     "src": "src/pack-component"
+    },
+    {
+     "src": "src/installer/installer.ps1"
+    },
+    {
+     "src": "src/README.md"
+    }
+   ],
+   "os": "windows"
+  },
+  {
+   "id": "pack",
+   "os": "linux",
+   "name": "配布の道具（setup・update・uninstall と dsh の設定のひな形．Linux）",
+   "version": "0.1.0",
+   "from": [
+    {
+     "src": "src/pack-component"
+    },
+    {
+     "src": "src/installer/setup.sh"
+    },
+    {
+     "src": "src/README.linux.md",
+     "as": "README.md"
+    }
+   ],
+   "exec": [
+    "setup.sh"
+   ]
+  },
+  {
+   "id": "shell",
+   "name": "アプリの枠（Tauri 2）",
+   "version": "0.1.0",
+   "optional": true,
+   "entry": "Sync-Strata.exe",
+   "from": [
+    {
+     "src": "<your-path>/SyncStrata-build/dist-win"
+    }
+   ],
+   "os": "windows"
+  },
+  {
+   "id": "shell",
+   "os": "linux",
+   "name": "アプリの枠（Tauri 2．Linux）",
+   "version": "0.1.0",
+   "optional": true,
+   "entry": "sync-strata",
+   "exec": [
+    "sync-strata",
+    "Sync-Strata.AppImage"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/SyncStrata-build/dist-linux"
+    }
+   ]
+  },
+  {
+   "id": "launcher",
+   "name": "起動の道具（sync.py）",
+   "version": "0.1.1",
+   "optional": true,
+   "from": [
+    {
+     "src": "<your-path>/launcher"
+    }
+   ],
+   "exclude": [
+    "layout.dev.json",
+    "*.cmd.bak*",
+    "*.pregui",
+    "*.bak*",
+    ".*",
+    "*.bak-*"
+   ],
+   "note": "11/15 S2: 作業の置き場の写し（元の tools/night/launcher は別の係の試験用）．layout.dev.json は作者の PC の並びなので入れない",
+   "exec": [
+    "sync.sh"
+   ]
+  },
+  {
+   "id": "chat",
+   "name": "会話の画面と中継",
+   "version": "0.1.1",
+   "optional": true,
+   "from": [
+    {
+     "src": "<your-path>/DeepSeekHarness/mobile/public",
+     "dst": "public"
+    },
+    {
+     "src": "<your-path>/chat-pack/server-pack1115.mjs",
+     "as": "server.mjs"
+    },
+    {
+     "src": "<your-path>/chat-pack/session-proxy-pack1115.mjs",
+     "as": "session-proxy.mjs"
+    },
+    {
+     "src": "<your-path>/DeepSeekHarness/mobile/remote-qr.mjs"
+    },
+    {
+     "src": "<your-path>/DeepSeekHarness/mobile/remote.mjs"
+    },
+    {
+     "src": "<your-path>/DeepSeekHarness/mobile/models/model_dl.py",
+     "dst": "models"
+    },
+    {
+     "src": "<your-path>/chat-pack/models/models.dist.json",
+     "dst": "models"
+    },
+    {
+     "src": "<your-path>/chat-pack/version.json"
+    }
+   ],
+   "note": "11/15 S2: 画面（public）とダウンロードの道具は本番そのまま．中継・会話の中継・モデルの一覧は s2/make_chat_pack.py が本番から作った写し（組む前に流す．--check で本番が変わったかを見る）",
+   "exclude": [
+    "public/aurora*"
+   ]
+  },
+  {
+   "id": "engine",
+   "name": "エンジンの共通の部分（serve と学習なしの表）",
+   "version": "0.2.7-win1116a",
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a/serve-py",
+     "dst": "serve"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a/BUILD.json"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a/bench/expert-profile-upstream.bin",
+     "dst": "data"
+    }
+   ],
+   "note": "11/15 夜 S2: 世代ごとの exe と DLL は engine-<種類> に分けた",
+   "os": "windows"
+  },
+  {
+   "id": "engine",
+   "os": "linux",
+   "name": "エンジンの共通の部分（serve と学習なしの表．Linux）",
+   "version": "0.2.7-linux1115r",
+   "optional": true,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r/serve-py",
+     "dst": "serve"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r/BUILD.json"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r/bench/expert-profile-upstream.bin",
+     "dst": "data"
+    }
+   ]
+  },
+  {
+   "id": "engine-cuda13",
+   "name": "エンジン（NVIDIA RTX 20〜50・GTX 16．CUDA 13）",
+   "version": "0.2.7-win1116a",
+   "variant": "cuda13",
+   "main_zip": true,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a/bin",
+     "dst": "bin"
+    }
+   ],
+   "os": "windows"
+  },
+  {
+   "id": "engine-cuda13",
+   "os": "linux",
+   "name": "エンジン（NVIDIA RTX 20〜50・GTX 16．CUDA 13．Linux）",
+   "version": "0.2.7-linux1115r",
+   "variant": "cuda13",
+   "main_zip": true,
+   "optional": true,
+   "exec": [
+    "bin/strata",
+    "bin/strata-vision",
+    "bin/strata-device"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r/bin",
+     "dst": "bin"
+    }
+   ]
+  },
+  {
+   "id": "engine-cuda12",
+   "name": "エンジン（NVIDIA GTX 10．CUDA 12．試験的）",
+   "version": "0.2.7-win1115rcu12",
+   "variant": "cuda12",
+   "main_zip": false,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1115r-cu12/bin",
+     "dst": "bin"
+    }
+   ],
+   "optional": true,
+   "os": "windows"
+  },
+  {
+   "id": "engine-cuda12",
+   "os": "linux",
+   "name": "エンジン（NVIDIA GTX 10．CUDA 12．試験的．Linux）",
+   "version": "0.2.7-linux1115r",
+   "variant": "cuda12",
+   "main_zip": false,
+   "optional": true,
+   "exec": [
+    "bin/strata",
+    "bin/strata-vision",
+    "bin/strata-device"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-cu12/bin",
+     "dst": "bin"
+    }
+   ]
+  },
+  {
+   "id": "engine-hip-rx9070",
+   "name": "エンジン（Radeon RX 9000．試験的）",
+   "version": "0.2.7-win1116a",
+   "variant": "hip-rx9070",
+   "main_zip": false,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rx9070/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rx9070/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "optional": true,
+   "os": "windows",
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+  },
+  {
+   "id": "engine-hip-rx9070",
+   "os": "linux",
+   "name": "エンジン（Radeon RX 9000．試験的．Linux）",
+   "version": "0.2.7-linux1115r",
+   "variant": "hip-rx9070",
+   "main_zip": false,
+   "optional": true,
+   "exec": [
+    "bin/strata",
+    "bin/strata-vision",
+    "bin/strata-device"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rx9070/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rx9070/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+  },
+  {
+   "id": "engine-hip-rdna3",
+   "name": "エンジン（Radeon RX 7000．試験的）",
+   "version": "0.2.7-win1116a",
+   "variant": "hip-rdna3",
+   "main_zip": false,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rdna3/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rdna3/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "optional": true,
+   "os": "windows",
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+  },
+  {
+   "id": "engine-hip-rdna3",
+   "os": "linux",
+   "name": "エンジン（Radeon RX 7000．試験的．Linux）",
+   "version": "0.2.7-linux1115r",
+   "variant": "hip-rdna3",
+   "main_zip": false,
+   "optional": true,
+   "exec": [
+    "bin/strata",
+    "bin/strata-vision",
+    "bin/strata-device"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rdna3/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rdna3/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+  },
+  {
+   "id": "engine-hip-rdna2",
+   "name": "エンジン（Radeon RX 6000．試験的）",
+   "version": "0.2.7-win1116a",
+   "variant": "hip-rdna2",
+   "main_zip": false,
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rdna2/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1116a-hip-rdna2/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "optional": true,
+   "os": "windows",
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+  },
+  {
+   "id": "engine-hip-rdna2",
+   "os": "linux",
+   "name": "エンジン（Radeon RX 6000．試験的．Linux）",
+   "version": "0.2.7-linux1115r",
+   "variant": "hip-rdna2",
+   "main_zip": false,
+   "optional": true,
+   "exec": [
+    "bin/strata",
+    "bin/strata-vision",
+    "bin/strata-device"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rdna2/bin",
+     "dst": "bin"
+    },
+    {
+     "src": "<your-path>/QuantLab/release/kit-linux-1115r-hip-rdna2/BUILD.json",
+     "dst": ""
+    }
+   ],
+   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+  },
+  {
+   "id": "python",
+   "name": "Python 3.12 と部品（embeddable）",
+   "version": "3.12.10-1115",
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/release/kit-win-1115/python"
+    }
+   ],
+   "exclude": [
+    "Lib/site-packages/*.dist-info/direct_url.json",
+    "Scripts/*.exe"
+   ],
+   "note": "11/15 S2: Scripts の *.exe（pip などの入口）は組んだ PC の python.exe の道のりを中に持ち，入れた先では動かないので入れない（部品は python -m で使う）",
+   "os": "windows"
+  },
+  {
+   "id": "python",
+   "os": "linux",
+   "name": "Python 3.12 と部品（python-build-standalone．Linux）",
+   "version": "3.12-linux1116",
+   "optional": true,
+   "exec": [
+    "bin/*"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/s2-linux/python"
+    }
+   ]
+  },
+  {
+   "id": "node",
+   "name": "Node（dsh を動かす node.exe の写し）",
+   "version": "24.19.0",
+   "from": [
+    {
+     "src": "<your-path>/DeepSeekHarness/bin/dsh-node.exe"
+    }
+   ],
+   "os": "windows"
+  },
+  {
+   "id": "node",
+   "os": "linux",
+   "name": "Node（dsh を動かす node の写し．Linux）",
+   "version": "24.19.0-linux",
+   "optional": true,
+   "exec": [
+    "dsh-node"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/s2-linux/node/dsh-node"
+    },
+    {
+     "src": "<your-path>/QuantLab/s2-linux/node/LICENSE",
+     "as": "LICENSE-node.txt"
+    }
+   ]
+  },
+  {
+   "id": "dsh",
+   "name": "dsh（@deepseek-ai/dsh，MIT）",
+   "version": "0.2.0-rc.2",
+   "from": [
+    {
+     "src": "<your-path>/DeepSeekHarness/node_modules",
+     "dst": "node_modules"
+    },
+    {
+     "src": "<your-path>/DeepSeekHarness/package.json"
+    },
+    {
+     "src": "<your-path>/DeepSeekHarness/package-lock.json"
+    },
+    {
+     "src": "<your-path>/dsh-plugins/dsh-rustxng",
+     "dst": "plugins/dsh-rustxng"
+    }
+   ],
+   "os": "windows",
+   "exclude": [
+    "plugins/dsh-rustxng/tests/*",
+    "plugins/dsh-rustxng/.git/*",
+    "plugins/dsh-rustxng/docs/*"
+   ]
+  },
+  {
+   "id": "dsh",
+   "os": "linux",
+   "name": "dsh（@deepseek-ai/dsh，MIT．Linux の node_modules）",
+   "version": "0.2.0-rc.2-linux",
+   "optional": true,
+   "exec": [
+    "node_modules/.bin/*"
+   ],
+   "from": [
+    {
+     "src": "<your-path>/QuantLab/s2-linux/dsh/node_modules",
+     "dst": "node_modules"
+    },
+    {
+     "src": "<your-path>/QuantLab/s2-linux/dsh/package.json"
+    },
+    {
+     "src": "<your-path>/QuantLab/s2-linux/dsh/package-lock.json"
+    },
+    {
+     "src": "<your-path>/dsh-plugins/dsh-rustxng",
+     "dst": "plugins/dsh-rustxng"
+    }
+   ],
+   "exclude": [
+    "plugins/dsh-rustxng/tests/*",
+    "plugins/dsh-rustxng/.git/*",
+    "plugins/dsh-rustxng/docs/*"
+   ]
+  },
+  {
+   "id": "licenses",
+   "name": "同梱の部品のライセンスの束",
+   "version": "0.1.0",
+   "optional": true,
+   "from": [
+    {
+     "src": "<your-path>/publish/package-licenses"
+    }
+   ],
+   "note": "11/15 夜: 文書の係がまとめる（入れた先は app\\licenses\\）．元の置き場ができるまでは optional で飛ばす"
+  }
+ ],
+ "github_account": "hiruhiru2005",
+ "note_feed": "11/16 S2: update_feed＝いちばん新しいリリース（update が新しい版を見つける．版の名前が入らない置き場），release_feed＝この版の zip の置き場（setup が手元に無い世代ごとのエンジンを取る）．どちらも GitHub のリリースに平らに置く．アカウントは github_account の 1 か所",
+ "shortcuts_linux": [
+  {
+   "name": "Sync-Strata",
+   "file": "sync-strata",
+   "target": "app/shell/sync-strata",
+   "fallback": "app/launcher/sync.sh",
+   "args": "up --gui --open",
+   "where": [
+    "desktop",
+    "startmenu"
+   ],
+   "description": "Sync-Strata（ローカルの LLM）"
+  },
+  {
+   "name": "Sync-Strata の更新",
+   "file": "sync-strata-update",
+   "target": "update.sh",
+   "where": [
+    "startmenu"
+   ],
+   "terminal": true
+  },
+  {
+   "name": "Sync-Strata を前の版に戻す",
+   "file": "sync-strata-rollback",
+   "target": "rollback.sh",
+   "where": [
+    "startmenu"
+   ],
+   "terminal": true
+  },
+  {
+   "name": "Sync-Strata を消す",
+   "file": "sync-strata-uninstall",
+   "target": "uninstall.sh",
+   "where": [
+    "startmenu"
+   ],
+   "terminal": true
+  }
+ ],
+ "release_feed": "https://github.com/{github_account}/sync-strata/releases/download/v{release}"
+}

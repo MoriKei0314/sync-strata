@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14171d">
+<title>dsh</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="screen auth"><div class="hero"><div class="hero-text" id="msg">…</div></div></div>
+<!-- 11/15 係 R: the phone opens pair.html#c=<one-time code> from the QR code on the PC. The code stays after "#" (never in a
+     server log); pair.js sends it once (POST /m/remote/claim), the relay logs this phone in to dsh, and /m/ opens. -->
+<script src="pair.js"></script>
+</body>
+</html>

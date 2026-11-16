@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sync-Strata",
+  "mainBinaryName": "Sync-Strata",
+  "version": "0.1.0",
+  "identifier": "syncstrata.desktop",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "shortDescription": "ローカル LLM Sync-Strata",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma",
+        "languages": ["Japanese"]
+      }
+    }
+  }
+}

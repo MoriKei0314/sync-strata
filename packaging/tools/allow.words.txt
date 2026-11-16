@@ -1,0 +1,3 @@
+# 公開のアカウント名（11/16 本人の決定）．検査はこの語を完全一致で消してから語を探す（build_pack.py・scan_private.py）
+hiruhiru2005
+hiru2005

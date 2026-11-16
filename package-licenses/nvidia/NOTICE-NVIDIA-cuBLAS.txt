@@ -1,0 +1,10 @@
+NVIDIA cuBLAS (cublas64_13.dll, cublasLt64_13.dll, CUDA 13.0)
+
+These files are NVIDIA Corporation's and are redistributed unmodified, as redistributable runtime
+components of the NVIDIA CUDA Toolkit, under the NVIDIA CUDA Toolkit End User License Agreement:
+https://docs.nvidia.com/cuda/eula/
+
+They are included only so that the Sync-Strata engine (engine/bin/strata.exe) can run, and are
+used only by it. Copyright (c) NVIDIA Corporation. All rights reserved. NVIDIA and CUDA are
+trademarks of NVIDIA Corporation. The terms of the EULA, including its third-party notices
+(Attachment B), apply to these files.

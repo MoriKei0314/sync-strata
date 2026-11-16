@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#14171d">
+<meta name="dsh-version" content="__V__">
+<title>dsh</title>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="dsh">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="description" content="Use dsh (Strata) from a phone, a tablet or a PC">
+<!-- use-credentials: the manifest sits behind the Cloudflare Access login, so the request must carry its cookie -->
+<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<!-- 11/14: the heading font is bundled (app.css @font-face); nothing is loaded from other sites -->
+<link rel="stylesheet" href="app.css?v=__V__">
+</head>
+<body>
+<div id="app"></div>
+<!-- 11/14: the words (i18n.js and lang-*.json) and this installation's settings (config.js) come first -->
+<script src="i18n.js?v=__V__"></script>
+<script src="config.js?v=__V__"></script>
+<script src="api.js?v=__V__"></script>
+<script src="md.js?v=__V__"></script>
+<script src="store.js?v=__V__"></script>
+<script src="ui.js?v=__V__"></script>
+<script src="fx.js?v=__V__"></script>
+<script src="attach.js?v=__V__"></script>
+<script src="composer.js?v=__V__"></script>
+<script src="cards.js?v=__V__"></script>
+<script src="actions.js?v=__V__"></script>
+<script src="strata.js?v=__V__"></script>
+<script src="setup.js?v=__V__"></script>
+<script src="remote.js?v=__V__"></script>
+<script src="device-banner.js?v=__V__"></script>
+<script src="ctx-settings.js?v=__V__"></script>
+<script src="env-check.js?v=__V__"></script>
+<script src="view-list.js?v=__V__"></script>
+<script src="media.js?v=__V__"></script>
+<script src="copy.js?v=__V__"></script>
+<script src="view-chat.js?v=__V__"></script>
+<script src="wide.js?v=__V__"></script>
+<script src="app.js?v=__V__"></script>
+</body>
+</html>

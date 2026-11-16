@@ -1,0 +1,19 @@
+Where to get the source code of the bundled parts under LGPL-3.0 and MPL-2.0
+
+All of these are shipped unmodified. Their full license texts are in this folder
+(LGPL-3.0.txt with GPL-3.0.txt, which it builds on, and MPL-2.0.txt).
+
+LGPL-3.0-or-later
+- libvips 8.18.7 (dsh/node_modules/@img/sharp-win32-x64/lib/*.dll, from the npm package
+  @img/sharp-win32-x64 0.35.5). Source: https://github.com/libvips/libvips (tag v8.18.7) and the build
+  scripts at https://github.com/lovell/sharp-libvips . The DLLs are separate files: you may replace them
+  with your own build of the same interface.
+
+MPL-2.0
+- LibreOffice Kit 0.1.5 (dsh/node_modules/@deepseek-ai/libreoffice-kit and libreoffice-kit-win32-x64).
+  The package ships its own source references and patches in libreoffice-kit-win32-x64/sources/
+  (core-source.json, core-changes.patch). LibreOffice source: https://github.com/LibreOffice/core
+- certifi and tqdm (Python packages, python/Lib/site-packages): https://pypi.org/project/certifi/ ,
+  https://pypi.org/project/tqdm/ (source distributions of the same versions).
+- Rust crates cssparser, cssparser-macros, selectors, dtoa-short, option-ext (compiled into the app):
+  https://crates.io/ (the same versions as listed in rust/THIRD-PARTY-NOTICES-app.txt).

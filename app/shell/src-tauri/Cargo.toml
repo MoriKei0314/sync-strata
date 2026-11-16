@@ -1,0 +1,33 @@
+# Sync-Strata のアプリの枠（11/15 係 T）．本家 Strata の apps/desktop/src-tauri を写して，窓・常駐・1 つだけ起動・インストーラーだけに削った物．
+[package]
+name = "sync-strata"
+version = "0.1.0"
+description = "Sync-Strata（ローカル LLM）のアプリの枠"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Linux: トレイの部品を読み込めるかを dlopen で確かめる．
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 素の cargo build でも同梱の画面（ui/）を読むように，custom-protocol を既定で入れる．
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 4
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true
