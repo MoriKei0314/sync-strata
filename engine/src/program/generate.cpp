@@ -537,6 +537,11 @@ static bool ql_kv_loan() {
     static const bool on = [] { const char* v = std::getenv("STRATA_QL_KV_LOAN"); return v == nullptr || std::atoi(v) != 0; }();
     return on;
 }
+// QuantLab (11/18) STRATA_QL_WINDOW_REDO: until this time (progress_now_ms) a silent verify window is released by the
+// watchdog even on a card that is not full any more - the redo of a window released on a full card can stall the
+// same way after the expert cache gave VRAM back (vq12, 11/18)
+static std::atomic<int64_t> g_ql_redo_armed_ms{0};
+
 static int64_t ql_kv_loan_min_chunk() {
     static const int64_t c = [] {
         const char* v = std::getenv("STRATA_QL_KV_LOAN_MIN_CHUNK");
@@ -6571,8 +6576,9 @@ int main(int argc, char** argv) {
     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
     strata::core::MtpDrafter mtp;
 #if defined(STRATA_HAVE_DFLASH2)
-    strata::core::Dflash2Drafter df2;   // --draft dflash2 (CLI spec loop only)
+    strata::core::Dflash2Drafter df2;   // --draft dflash2 (the CLI spec loop, and the serve loop on one card without --batch: QuantLab 11/16)
     bool use_df2 = false;
+    int df2_cap = 0;   // serve: the widest DFlash2 window (--draft-cap, else by card; 0 = --spec, at most 8)
 #endif
     // the draft layer's geometry (the canonical model's MTP head), `static` because MtpDrafter keeps a reference; the batch
     // slots' draft-KV copies use this one too
@@ -6602,6 +6608,63 @@ int main(int argc, char** argv) {
             mtp.enable_cell_floor(kc.wants_cell_floor(ke, !o.mtp.empty() && o.spec >= 2));
         }
     }
+#if defined(STRATA_HAVE_DFLASH2)
+    // QuantLab (11/16): the DFlash2 load, with --mtp (CLI and serve: the MTP layer stays as the fallback) and, in the serve loop only,
+    // without it (--mtp-draft-vocab names the draft vocabulary; no MTP layer in VRAM: about 0.8 GiB more for the expert cache)
+    auto df2_try_load = [&]() {
+        if (o.draft == "dflash2") {
+            // QuantLab (11/16): --serve takes it too, on one card without --batch (the single-slot loop; df2_serve below)
+            const char* why = o.spec < 2 ? "it needs --spec 2 or more"
+                              : o.mtp.empty() && !o.serve ? "it needs --mtp (the fallback)"
+                              : o.mtp.empty() && o.mtp_draft_vocab.empty() ? "without --mtp it needs --mtp-draft-vocab FILE (the MTP folder's draft_vocab.bin)"
+                              : !native_pack ? "it needs a native pack"
+                              : multi_gpu || o.batch > 0 ? "it is for one card without --batch or a layer split in this build"
+                              : o.serve && o.prefill_head_alias ? "--prefill-head-alias lends the output head it reads to the prompt"
+                              : o.draft_model.empty() ? "it needs --draft-model PACK (tools/dflash2_pack.py)" : nullptr;
+            if (why == nullptr) {
+                if (df2.load(o.draft_model, 0, err)) {
+                    use_df2 = true;
+                    // Per card class, from the measured A/Bs (notes-dflash2-p1.md): on Strix Halo a window of 5 is the agent-safe pick (cap 6 ties on
+                    // agent prompts); a 12 GB NVIDIA card is slower with DFlash2 than with the MTP at every cap but code, which only the user can know.
+                    // Recommend, never force: the window is capped for the card unless --draft-cap says otherwise, and a small NVIDIA card gets one plain line.
+                    cudaDeviceProp dp{};
+                    if (cudaGetDeviceProperties(&dp, 0) == cudaSuccess) {
+#if defined(STRATA_USE_HIP)
+                        const bool uma = strata::kernels::gfx_arch_is_gfx1151(dp.gcnArchName);
+#else
+                        const bool uma = false;
+#endif
+#if defined(STRATA_USE_HIP)
+                        const int cc_major = 0;
+#else
+                        const int cc_major = dp.major;
+#endif
+                        const int cap = o.draft_cap > 0 ? o.draft_cap : strata::core::dflash2_auto_cap(uma, cc_major);
+                        // QuantLab (11/16): the server keeps --spec (the lookup and suffix windows go up to it) and caps only the
+                        // DFlash2 windows (df2_cap, used by the serve loop); the CLI lowers --spec as before
+                        if (o.serve) df2_cap = cap;
+                        else if (cap > 0 && o.spec > cap) {
+                            std::fprintf(stderr, "strata generate: --draft dflash2: windows capped at %d tokens (%s; --draft-cap N changes it)\n", cap,
+                                         o.draft_cap > 0 ? "as asked" : "the width measured best on this card");
+                            o.spec = cap;
+                        }
+#if !defined(STRATA_USE_HIP)
+                        if (o.draft_cap == 0 && strata::core::dflash2_small_nvidia(true, dp.totalGlobalMem))
+                            std::fprintf(stderr, "strata generate: --draft dflash2: on a 12 GB NVIDIA card the MTP drafter was faster in most measurements "
+                                                 "(code prompts at a window of 6 gained 3%%); continuing as asked\n");
+#endif
+                    }
+                } else {
+                    std::fprintf(stderr, "strata generate: --draft dflash2: %s. DFlash2 needs about 1.2 GiB of VRAM (the pack 0.76 GiB, its buffers and K/V ring "
+                                         "0.25 GiB, a draft head 0.2 GiB); start with --vram-reserve-mib 1900 to keep it (the expert cache then gives up about 2.5%% "
+                                         "of its experts to the CPU), or a smaller --max-context. %s.\n", err.c_str(), o.mtp.empty() ? "Only the lookup drafts" : "The MTP drafts instead");
+                }
+            } else {
+                std::fprintf(stderr, "strata generate: --draft dflash2 is off: %s; %s\n", why, o.mtp.empty() ? "only the lookup drafts" : "the MTP drafts instead");
+            }
+        }
+    };
+#endif
     if (!o.mtp.empty()) {
         if (o.spec < 2) {
             std::fprintf(stderr, "strata generate: --mtp is ignored without --spec T (T >= 2)\n");
@@ -6624,50 +6687,7 @@ int main(int argc, char** argv) {
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_first ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
 #if defined(STRATA_HAVE_DFLASH2)
-        if (o.draft == "dflash2") {
-            const char* why = o.mtp.empty() ? "it needs --mtp (the fallback) and --spec 2 or more"
-                              : !native_pack ? "it needs a native pack"
-                              : multi_gpu || o.batch > 0 || o.serve ? "it is for one card and the CLI run (not --serve, --batch or a layer split) in this build"
-                              : o.draft_model.empty() ? "it needs --draft-model PACK (tools/dflash2_pack.py)" : nullptr;
-            if (why == nullptr) {
-                if (df2.load(o.draft_model, 0, err)) {
-                    use_df2 = true;
-                    // Per card class, from the measured A/Bs (notes-dflash2-p1.md): on Strix Halo a window of 5 is the agent-safe pick (cap 6 ties on
-                    // agent prompts); a 12 GB NVIDIA card is slower with DFlash2 than with the MTP at every cap but code, which only the user can know.
-                    // Recommend, never force: the window is capped for the card unless --draft-cap says otherwise, and a small NVIDIA card gets one plain line.
-                    cudaDeviceProp dp{};
-                    if (cudaGetDeviceProperties(&dp, 0) == cudaSuccess) {
-#if defined(STRATA_USE_HIP)
-                        const bool uma = strata::kernels::gfx_arch_is_gfx1151(dp.gcnArchName);
-#else
-                        const bool uma = false;
-#endif
-#if defined(STRATA_USE_HIP)
-                        const int cc_major = 0;
-#else
-                        const int cc_major = dp.major;
-#endif
-                        const int cap = o.draft_cap > 0 ? o.draft_cap : strata::core::dflash2_auto_cap(uma, cc_major);
-                        if (cap > 0 && o.spec > cap) {
-                            std::fprintf(stderr, "strata generate: --draft dflash2: windows capped at %d tokens (%s; --draft-cap N changes it)\n", cap,
-                                         o.draft_cap > 0 ? "as asked" : "the width measured best on this card");
-                            o.spec = cap;
-                        }
-#if !defined(STRATA_USE_HIP)
-                        if (o.draft_cap == 0 && strata::core::dflash2_small_nvidia(true, dp.totalGlobalMem))
-                            std::fprintf(stderr, "strata generate: --draft dflash2: on a 12 GB NVIDIA card the MTP drafter was faster in most measurements "
-                                                 "(code prompts at a window of 6 gained 3%%); continuing as asked\n");
-#endif
-                    }
-                } else {
-                    std::fprintf(stderr, "strata generate: --draft dflash2: %s. DFlash2 needs about 1.2 GiB of VRAM (the pack 0.76 GiB, its buffers and K/V ring "
-                                         "0.25 GiB, a draft head 0.2 GiB); start with --vram-reserve-mib 1900 to keep it (the expert cache then gives up about 2.5%% "
-                                         "of its experts to the CPU), or a smaller --max-context. The MTP drafts instead.\n", err.c_str());
-                }
-            } else {
-                std::fprintf(stderr, "strata generate: --draft dflash2 is off: %s; the MTP drafts instead\n", why);
-            }
-        }
+        df2_try_load();
 #endif
         if (batch_mtp) {
             // Slot b's drafter lives where the solo drafter does (the guard above: the last stage's GPU), carved from the
@@ -6698,6 +6718,9 @@ int main(int argc, char** argv) {
             }
         }
     }
+#if defined(STRATA_HAVE_DFLASH2)
+    else if (o.serve && o.draft == "dflash2") df2_try_load();   // QuantLab (11/16): DFlash2 alone (no MTP layer)
+#endif
     // THE HEAD BEFORE THE CACHE, AND BEFORE THE ARENA.  The expert cache takes what is free minus the reserve, so
     // everything allocated after it comes out of the reserve.  The native head (~0.5 GB with IQ3_S) was loaded after
     // it and ate most of the 700 MiB: 128K IQ3_S ended with 30 MiB free, the driver paged, and a request stalled for
@@ -6868,6 +6891,7 @@ int main(int argc, char** argv) {
     }
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
+    strata::core::FileExpertSource* file_srcp = nullptr;   // QuantLab 11/18: srcp when it is the file source (its mapped pages)
     if (o.mmap_experts) {
         // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
         // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
@@ -6970,6 +6994,7 @@ int main(int argc, char** argv) {
             src.set_io_stats(true);
         }
         srcp = &src;
+        file_srcp = &src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
         // Under WDDM (Windows, WSL2), a multi-GPU run (a layer split, or remote experts) starts with at most 8 GiB of
@@ -7023,7 +7048,12 @@ int main(int argc, char** argv) {
                         int64_t mtp_b = (!o.mtp.empty() && native_head.loaded())
                                             ? (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) : 0;
 #if defined(STRATA_HAVE_DFLASH2)
-                        if (use_df2 && native_head.loaded()) mtp_b += (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) + (48 << 20);   // DFlash2's own draft head and logits
+                        // DFlash2's own draft head and logits (QuantLab 11/16: counted from its vocabulary file, which needs no MTP layer)
+                        if (use_df2 && native_head.loaded())
+                            mtp_b += (int64_t) strata::core::Dflash2Drafter::bind_bytes_for(o.mtp_draft_vocab.empty() ? (o.mtp.empty() ? std::string() : o.mtp + "/draft_vocab.bin") : o.mtp_draft_vocab,
+                                                                                         native_head.row_bytes(), n_vocab) + (48 << 20);
+                        // QuantLab (11/16) serve: the prompt path's tap staging (2048 rows x 5 x n_embd floats) and the drafter's own 8 rows
+                        if (use_df2 && o.serve) mtp_b += (int64_t) (2048 + 8) * 5 * (int64_t) g.n_embd * 4;
 #endif
                         if (stages.empty())
                             for (const auto& d : slot_mtp) mtp_b += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
@@ -7282,7 +7312,13 @@ int main(int argc, char** argv) {
             for (const auto& d : slot_mtp)
                 mtp_bind += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
 #if defined(STRATA_HAVE_DFLASH2)
-        if (use_df2 && native_head.loaded()) mtp_bind += (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) + (48 << 20);   // DFlash2's own draft head and logits, bound after this
+        // DFlash2's own draft head and logits, bound after this (QuantLab 11/16: counted from its vocabulary file, which needs no MTP layer)
+        if (use_df2 && native_head.loaded())
+            mtp_bind += (int64_t) strata::core::Dflash2Drafter::bind_bytes_for(o.mtp_draft_vocab.empty() ? (o.mtp.empty() ? std::string() : o.mtp + "/draft_vocab.bin") : o.mtp_draft_vocab,
+                                                                             native_head.row_bytes(), n_vocab) + (48 << 20);
+        // QuantLab (11/16) serve: the prompt path's tap staging (2048 rows x 5 x n_embd floats, allocated at the first tapped read) and the
+        // drafter's own 8 rows (prepare_own)
+        if (use_df2 && o.serve) mtp_bind += (int64_t) (2048 + 8) * 5 * (int64_t) g.n_embd * 4;
 #endif
         const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first;
         const int64_t blob = (int64_t) nibble_max_slot_bytes();   // max_blob (STRATA_EXPERT_NIBBLE: or a larger 4-bit slot)
@@ -9072,7 +9108,10 @@ int main(int argc, char** argv) {
         if (!hm) return chunk;
         const uint64_t slack = 1200ull << 20;   // MemAvailable overstates what the cache can hold (~1 GiB on the #2824 box)
         pp::Host host;
-        host.page_cache = src.unbuffered() ? 0 : (hm->available > slack ? hm->available - slack : 0);
+        // QuantLab 11/18: the file tier's own mapped pages in this process's working set ARE cached experts, though the
+        // available RAM leaves them out (Windows, read through the file cache; 0 otherwise)
+        const uint64_t own_cached = src.unbuffered() ? 0 : src.reclaimable_mapped_bytes();
+        host.page_cache = src.unbuffered() ? 0 : (hm->available + own_cached > slack ? hm->available + own_cached - slack : 0);
         host.h2d_gbps = g_last_h2d_gbps > 0.0 ? g_last_h2d_gbps : 12.0;
         std::string why;
         host.ssd_gbps = drive_read_gbps(o.native_preset.empty() ? o.pack : o.native_preset, why);   // where the experts live
@@ -9151,6 +9190,9 @@ int main(int argc, char** argv) {
     // fit, the cache simply holds fewer experts while a long one is live.
     struct KvGrow {
         bool on = false;
+        // QuantLab (11/17, I-16): the K/V was made elastic at start, but the cache has no slot to give (kvg_start): it grows
+        // into new VRAM only, and nothing shrinks
+        bool fresh_only = false;
         int64_t top = 0, lo = 0;          // slots [lo, top) hold no expert; their whole chunks may be with the K/V
         int64_t floor = 128;              // the cache keeps at least these slots
         int64_t step = 8192;              // the K/V grows in whole steps of cells
@@ -9168,11 +9210,37 @@ int main(int argc, char** argv) {
         // halving), down to the chunk `top_cap` keeps room for.  `top0`: where the loan started; kvg_trim moves back to it.
         bool loan = false;
         int64_t top0 = 0, top_cap = 0, loan_min_chunk = 0, loan_taken = 0;
+        // QuantLab (11/18): the chunks the VRAM pressure gave back to the driver (kvg_ensure's `release`; kvg_trim's `back`
+        // maps them again)
+        int64_t vram_out = 0;
+        // QuantLab (11/18): how far the VRAM pressure (only it) may go into the loan: room for a 256-token chunk, not
+        // top_cap's STRATA_QL_KV_LOAN_MIN_CHUNK (1024).  An 8 GB card gave 316 of the 768 MiB another program took and
+        // stalled at top_cap; a prompt read then halves its chunk down to 256 until the pressure eases.
+        int64_t top_cap_vpr = 0;
     } kvg;
     auto kvg_start = [&](int64_t top, int64_t top_cap = -1) {
         kvg.on = strata::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && d_res != nullptr &&
                  !host_res.empty() && srcp != nullptr && top > kvg.floor;
-        if (!kvg.on) return;
+        if (!kvg.on) {
+            // QuantLab (11/17, I-16): qsa_set_kv_elastic made the K/V elastic (STRATA_KV_GROW_INIT cells, 16,384) before
+            // the cache was sized.  A cache at or below the floor (an 8 GB card with the resident RAM mode: 45-79 slots)
+            // left kvg off, every grower is behind `if (kvg.on)`, and a prompt past those cells read unmapped VRAM
+            // ("dequant launch: an illegal memory access was encountered" at 16,384 tokens, 0.1.52 and A alike).  Such a
+            // K/V now grows into new VRAM only; a prompt it cannot fit stops with "the K/V cannot grow".
+            if (!strata::core::qsa_kv_elastic()) return;
+            kvg.on = kvg.fresh_only = true;
+            kvg.top = kvg.lo = kvg.top0 = kvg.top_cap = top;
+            kvg.cells = strata::core::qsa_kv_elastic_cells();
+            if (const char* v = std::getenv("STRATA_KV_GROW_STEP"); v != nullptr && std::atoll(v) > 0) kvg.step = std::atoll(v);
+            std::fprintf(stderr, "strata generate: elastic K/V: %lld of %lld cells in VRAM (%.2f of %.2f GiB); the expert "
+                                 "cache (%lld slots, the K/V's place from slot %lld) has none to give (it keeps %lld): the "
+                                 "K/V grows into new VRAM only, and a prompt it cannot fit stops (\"the K/V cannot grow\")\n",
+                         (long long) kvg.cells, (long long) o.max_context,
+                         (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
+                         (double) strata::core::qsa_kv_elastic_full_bytes() / 1073741824.0, (long long) xcache.slots(),
+                         (long long) top, (long long) kvg.floor);
+            return;
+        }
         kvg.top = kvg.lo = kvg.top0 = top;
         kvg.top_cap = std::max<int64_t>(top, top_cap);
         kvg.cells = strata::core::qsa_kv_elastic_cells();
@@ -9263,12 +9331,37 @@ int main(int argc, char** argv) {
     };
     // Room for `cells` cells (rounded up to a step).  `quiesce` must leave nothing running on the device and land
     // the adaptive tier's swaps (a swap in flight could still be writing a slot given up here).
-    auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce) -> bool {
-        if (!kvg.on || cells <= kvg.cells) return true;
-        const int64_t target = std::min<int64_t>(o.max_context, (cells + kvg.step - 1) / kvg.step * kvg.step);
-        const int64_t need = strata::core::qsa_kv_elastic_need(target);
+    // QuantLab (11/18): `release` > 0 (the VRAM pressure, vpr below): that many chunks go back to the driver instead of
+    // into the K/V - the spare ones first, then the slots the K/V would give (below the loan, then the loan's lowest).
+    // False when nothing could go.
+    auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce, int64_t release = 0) -> bool {
+        if (release > 0 && (!kvg.on || kvg.fresh_only)) return false;
+        if (release <= 0 && (!kvg.on || cells <= kvg.cells)) return true;
+        const int64_t target = release > 0 ? kvg.cells
+                                           : std::min<int64_t>(o.max_context, (cells + kvg.step - 1) / kvg.step * kvg.step);
+        const int64_t need = release > 0 ? release : strata::core::qsa_kv_elastic_need(target);
         if (need == 0) { kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
         quiesce();
+        if (kvg.fresh_only) {   // QuantLab (11/17, I-16): no slot to give (kvg_start): new VRAM only
+            int64_t fresh = 0;
+            auto take_new = [&]() -> strata::core::VmmChunk { ++fresh; return 0; };
+            bool ok = strata::core::qsa_kv_elastic_grow(target, take_new);
+            if (!ok && strata::core::conversation_park_vram_release_all() > 0) {
+                (void) cudaGetLastError();
+                ok = strata::core::qsa_kv_elastic_grow(target, take_new);
+            }
+            kvg.fresh += fresh;
+            kvg.cells = strata::core::qsa_kv_elastic_cells();
+            ++kvg.grows;
+            if (ok)
+                std::fprintf(stderr, "strata: K/V grown to %lld cells (%.2f GiB) in new VRAM (the expert cache has no slot to "
+                                     "give)\n", (long long) kvg.cells,
+                             (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0);
+            else
+                std::fprintf(stderr, "strata: the K/V could not grow to %lld cells in new VRAM (%s)\n", (long long) target,
+                             cudaGetErrorString(cudaGetLastError()));
+            return ok;
+        }
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
         std::vector<int32_t> owner;   // slot -> residency index
@@ -9432,7 +9525,9 @@ int main(int argc, char** argv) {
         }
         // QuantLab (10/31), STRATA_QL_KV_LOAN: past the floor, the loan's lowest slots (it starts higher: `top` moves up)
         int64_t took = 0;
-        while ((int64_t) kvg.spare.size() + freeable() < need && kvg.loan && kvg.top < kvg.top_cap) {
+        // (QuantLab 11/18: the VRAM pressure may go further, to a 256-token chunk's room - kvg.top_cap_vpr)
+        const int64_t loan_cap = release > 0 ? std::max<int64_t>(kvg.top_cap, kvg.top_cap_vpr) : kvg.top_cap;
+        while ((int64_t) kvg.spare.size() + freeable() < need && kvg.loan && kvg.top < loan_cap) {
             init_owner();
             const int32_t s = (int32_t) kvg.top;
             if (const int32_t so = owner[(size_t) s]; so >= 0)   // it is no colder slot to move into any more
@@ -9463,6 +9558,26 @@ int main(int argc, char** argv) {
             cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
             std::fprintf(stderr, "strata: the residency table upload failed: %s\n", cudaGetErrorString(cudaGetLastError()));
             return false;
+        }
+        if (release > 0) {   // QuantLab (11/18): the VRAM pressure - the chunks go back to the driver, the K/V stays as it is
+            int64_t freed = 0;
+            while (freed < release && !kvg.spare.empty()) {
+                strata::core::vmm_chunk_free(kvg.spare.back());
+                kvg.spare.pop_back();
+                ++freed;
+            }
+            kvg.vram_out += freed;
+            kvg.loan_taken += took;
+            kvg.ql_demoted += q_demoted;
+            kvg.ql_in_ram += q_in_ram;
+            kvg.ql_on_file += q_on_file;
+            std::fprintf(stderr, "strata: QuantLab: VRAM pressure: the expert cache gave %lld slots (%lld of them out of the "
+                                 "prompt path's loan; %lld hotter experts moved into colder ones' slots) and %lld MiB back to "
+                                 "the driver; %lld of %lld slots hold experts, %lld MiB given back in all\n",
+                         (long long) gave, (long long) took, (long long) moved, (long long) (((uint64_t) freed * G) >> 20),
+                         (long long) (kvg.lo + (xcache.slots() - kvg.top)), (long long) xcache.slots(),
+                         (long long) (((uint64_t) kvg.vram_out * G) >> 20));
+            return freed > 0;
         }
         int64_t fresh = 0;
         auto grow_take = [&]() -> strata::core::VmmChunk {
@@ -9512,30 +9627,50 @@ int main(int argc, char** argv) {
     };
     // A request that needs far fewer cells than the K/V holds gives the rest back: the slots refill with the
     // profile's hottest experts the GPU does not hold.  Run on a quiet device (as kvg_ensure's `quiesce`).
-    auto kvg_trim = [&](int64_t cells, int64_t hold) -> bool {   // `hold`: the cells a parked conversation could need
-        if (!kvg.on) return true;
-        // #1128: a parked conversation comes back through kvg_ensure's grow, so a K/V that fell to a short request's
-        // size is grown again (its experts shuffled again) after every short request in between: the K/V keeps the
-        // longest parked conversation's cells while it is parked
-        const int64_t want = std::max<int64_t>(cells, hold);
-        const int64_t target = std::max<int64_t>(kvg.step, (want + kvg.step - 1) / kvg.step * kvg.step);
-        if (kvg.cells < target + 2 * kvg.step || kvg.lo >= kvg.top) return true;
-        strata::core::qsa_kv_elastic_shrink(target, [&](strata::core::VmmChunk h) { kvg.spare.push_back(h); });
-        kvg.cells = strata::core::qsa_kv_elastic_cells();
+    // QuantLab (11/18): `back` > 0 (the VRAM pressure eased, vpr below): that many chunks of new VRAM go back into the
+    // cache - first the loan's slots the pressure took (top down to where the loan started), then from the lowest
+    // unmapped chunk up - and those slots refill as here; the K/V stays as it is
+    auto kvg_trim = [&](int64_t cells, int64_t hold, int64_t back = 0) -> bool {   // `hold`: the cells a parked conversation could need
+        if (!kvg.on || kvg.fresh_only) return true;   // (QuantLab 11/17: fresh_only gives nothing back)
+        if (back > 0) {
+            if (kvg.lo >= kvg.top) return true;
+        } else {
+            // #1128: a parked conversation comes back through kvg_ensure's grow, so a K/V that fell to a short request's
+            // size is grown again (its experts shuffled again) after every short request in between: the K/V keeps the
+            // longest parked conversation's cells while it is parked
+            const int64_t want = std::max<int64_t>(cells, hold);
+            const int64_t target = std::max<int64_t>(kvg.step, (want + kvg.step - 1) / kvg.step * kvg.step);
+            if (kvg.cells < target + 2 * kvg.step || kvg.lo >= kvg.top) return true;
+            strata::core::qsa_kv_elastic_shrink(target, [&](strata::core::VmmChunk h) { kvg.spare.push_back(h); });
+            kvg.cells = strata::core::qsa_kv_elastic_cells();
+        }
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
+        int64_t newc = 0;   // QuantLab (11/18): chunks of new VRAM asked for (map_range makes one where `take` gives 0)
+        auto take = [&]() -> strata::core::VmmChunk {   // the chunks handed back first
+            if (kvg.spare.empty()) { ++newc; return 0; }
+            const strata::core::VmmChunk h = kvg.spare.back();
+            kvg.spare.pop_back();
+            return h;
+        };
+        const int64_t top_was = kvg.top;
+        while (back > 0 && newc < back && kvg.top > kvg.top0 && kvg.top > kvg.lo) {   // QuantLab (11/18): the loan's first
+            const int64_t s = kvg.top - 1;
+            if (!r.map_range((int64_t) (xcache.slot_offset(s) / G), (int64_t) ((xcache.slot_offset(s + 1) + G - 1) / G),
+                             take)) {
+                std::fprintf(stderr, "strata: QuantLab: the expert cache could not take VRAM back from the driver\n");
+                break;
+            }
+            --kvg.top;
+        }
         const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
         {   // one run from the lowest unmapped chunk, as long as the chunks handed back last (one access call)
             const int64_t c0 = (int64_t) (xcache.slot_offset(kvg.lo) / G);
-            int64_t cend = c0, need = (int64_t) kvg.spare.size();
+            int64_t cend = c0, need = (int64_t) kvg.spare.size() + (back > 0 ? std::max<int64_t>(0, back - newc) : 0);
             while (cend < c1 && need > 0) need -= r.mapped(cend++) ? 0 : 1;
-            if (!r.map_range(c0, cend, [&]() -> strata::core::VmmChunk {
-                    if (kvg.spare.empty()) return 0;
-                    const strata::core::VmmChunk h = kvg.spare.back();
-                    kvg.spare.pop_back();
-                    return h;
-                }))
-                std::fprintf(stderr, "strata: the expert cache could not take its VRAM back from the K/V\n");
+            if (!r.map_range(c0, cend, take))
+                std::fprintf(stderr, back > 0 ? "strata: QuantLab: the expert cache could not take VRAM back from the driver\n"
+                                              : "strata: the expert cache could not take its VRAM back from the K/V\n");
         }
         const int64_t lo0 = kvg.lo;
         while (kvg.lo < kvg.top) {   // a slot whose chunks are all mapped again holds an expert again
@@ -9554,7 +9689,10 @@ int main(int argc, char** argv) {
         std::vector<uint8_t> ql_used;     // ...and the pairs taken (a profile listing a pair twice fills one slot)
         int64_t q_ram = 0, q_file = 0;
         if (kvg.ql) ql_used.assign(host_res.size(), 0);
-        for (int64_t s = lo0; s < kvg.lo; ++s) {
+        std::vector<int64_t> fill_slots;   // QuantLab (11/18): the loan's slots back from the driver (`back`), then [lo0, lo)
+        for (int64_t s = kvg.top; s < top_was; ++s) fill_slots.push_back(s);
+        for (int64_t s = lo0; s < kvg.lo; ++s) fill_slots.push_back(s);
+        for (const int64_t s : fill_slots) {
             const uint64_t room = xcache.slot_offset(s + 1) - xcache.slot_offset(s);
             if (kvg.ql) {
                 // QuantLab (10/29): slots sized per expert - a pair too large for this slot is tried again for the next ones
@@ -9619,9 +9757,19 @@ int main(int argc, char** argv) {
         if (res_put(d_res) != cudaSuccess) return false;
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
-        ++kvg.trims;
-        std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
-                             "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
+        if (back > 0) {   // QuantLab (11/18)
+            kvg.vram_out = std::max<int64_t>(0, kvg.vram_out - newc);
+            std::fprintf(stderr, "strata: QuantLab: VRAM pressure eased: the expert cache took %lld MiB back from the driver "
+                                 "for %lld slots (%zu refilled from the profile); %lld of %lld slots hold experts, %lld MiB "
+                                 "still given back\n",
+                         (long long) (((uint64_t) newc * G) >> 20), (long long) (kvg.lo - lo0 + top_was - kvg.top),
+                         filled.size(), (long long) (kvg.lo + (xcache.slots() - kvg.top)), (long long) xcache.slots(),
+                         (long long) (((uint64_t) kvg.vram_out * G) >> 20));
+        } else {
+            ++kvg.trims;
+            std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
+                                 "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
+        }
         // QuantLab (10/31), STRATA_QL_KV_LOAN: every slot back (the loan's too): the loan starts where it did at start again
         if (kvg.lo >= kvg.top && kvg.top > kvg.top0) {
             std::fprintf(stderr, "strata: QuantLab: the K/V gave the prompt path's loan its %lld slots back: it starts at "
@@ -9632,6 +9780,124 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata: QuantLab: K/V trim: %zu of those slots refilled with the hottest experts the GPU "
                                  "did not hold that fit them, %lld from the RAM copy, %lld from the drive\n",
                          filled.size(), (long long) q_ram, (long long) q_file);
+        return true;
+    };
+    // QuantLab (11/18, the user via strata-desktop): the VRAM pressure.  When another program takes VRAM while the engine
+    // runs (the display, a browser, a game), the free VRAM falls to 0, WDDM pages GPU memory to system RAM and decode
+    // stalls (no progress for 60 s, then a restart: the 11/17 night, a reserve of 512 MiB).  The engine now gives expert
+    // slots back to the driver itself, the way the elastic K/V takes them (kvg_ensure's `release`): below
+    // STRATA_QL_VRAM_PRESSURE_LOW MiB free (default 128) for 2 s - read every 0.5 s between decode windows - or at a
+    // request's start (at once there), one step of STRATA_QL_VRAM_PRESSURE_STEP MiB (default 256) goes, down to the K/V's
+    // floor (128 slots, and the loan's smallest chunk).  Once step + low + 128 MiB (512) stay free for 30 s (10 s for the
+    // steps after), a request's start takes a step back (kvg_trim's `back`: new VRAM, the slots refilled from the
+    // profile) until all of it is back.  Not "the reserve + 512 MiB": an 8 GB card at a reserve of 512 has ~300 MiB free,
+    // so a cache shrunk once would never come back.  Nothing moves while the free VRAM stays above the low line, so a card
+    // that never runs short decodes as before (one cudaMemGetInfo every 0.5 s).  Needs the elastic K/V's slots (--kv-grow
+    // on one NVIDIA GPU, a cache with slots to give).  STRATA_QL_VRAM_PRESSURE=0: off.
+    struct VramPressure {
+        bool on = false, said_floor = false, low_run = false, high_run = false, backing = false;
+        int64_t low_mib = 128, step_mib = 256, back_mib = 512, step_chunks = 0, shrinks = 0, grows = 0;
+        Clock::time_point last{}, low_since{}, high_since{};
+    } vpr;
+    auto vpr_start = [&]() {
+        const char* v = std::getenv("STRATA_QL_VRAM_PRESSURE");
+        if (v != nullptr && v[0] == '0') {
+            std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: off (STRATA_QL_VRAM_PRESSURE=0)\n");
+            return;
+        }
+        if (!o.serve) return;
+#if defined(STRATA_USE_HIP)
+        // QuantLab (11/18, the owner): on Radeon (HIP: hipMem* virtual memory, ROCm 6+) off by default until it has been
+        // tried there - STRATA_QL_VRAM_PRESSURE=1 turns it on
+        if (v == nullptr || v[0] != '1') {
+            std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: off on HIP by default (STRATA_QL_VRAM_PRESSURE=1 "
+                                 "turns it on)\n");
+            return;
+        }
+#endif
+        const char* why = !kvg.on || xcache.vmm_range() == nullptr ? "no elastic K/V (--kv-grow on one GPU)"
+                        : kvg.fresh_only ? "the expert cache has no slot to give"
+                        : strata::core::vmm_granularity() == 0 ? "no virtual memory (VMM)" : "";
+        if (why[0] != '\0') {
+            std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: off (%s): the expert cache does not give VRAM back "
+                                 "when other programs take it\n", why);
+            return;
+        }
+        if (const char* e = std::getenv("STRATA_QL_VRAM_PRESSURE_LOW"); e != nullptr && std::atoll(e) > 0) vpr.low_mib = std::atoll(e);
+        if (const char* e = std::getenv("STRATA_QL_VRAM_PRESSURE_STEP"); e != nullptr && std::atoll(e) >= 16) vpr.step_mib = std::atoll(e);
+        vpr.back_mib = vpr.step_mib + vpr.low_mib + 128;
+        vpr.step_chunks = std::max<int64_t>(1, (int64_t) (((uint64_t) vpr.step_mib << 20) / strata::core::vmm_granularity()));
+        vpr.on = true;
+        size_t cb = 0;
+        const bool card = strata::core::card_free_bytes(cb);
+        std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: on - below %lld MiB of VRAM free for 2 s (below %lld at "
+                             "once; read between decode windows and at a request's start, %s) the expert cache gives %lld "
+                             "MiB back to the driver, a step at a time down to %lld slots, and takes it back a step at a "
+                             "time once %lld MiB stay free for 30 s (STRATA_QL_VRAM_PRESSURE=0: off)\n",
+                     (long long) vpr.low_mib, (long long) (vpr.low_mib / 2),
+                     card ? "the whole card's figure (NVML)" : "this process's figure (cudaMemGetInfo)",
+                     (long long) vpr.step_mib, (long long) kvg.floor, (long long) vpr.back_mib);
+    };
+    // `at_start`: a request's start (nothing runs on the device; it may take a step back); otherwise between decode
+    // windows.  False: a step back failed on the device (the caller stops, as for kvg_trim).
+    auto vpr_tick = [&](bool at_start, const std::function<void()>& quiesce) -> bool {
+        if (!vpr.on) return true;
+        const auto now = Clock::now();
+        if (!at_start && now - vpr.last < std::chrono::milliseconds(500)) return true;
+        vpr.last = now;
+        for (int k = 0; k < (at_start ? 4 : 1); ++k) {
+            size_t fb = 0, tb = 0;
+            if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) {
+                (void) cudaGetLastError();
+                return true;
+            }
+            // under WDDM cudaMemGetInfo does not count what other programs hold (a ballast taking every free MiB left it at
+            // ~300 MiB while the card was full, 11/18): the whole card's figure where NVML answers
+            if (size_t cb = 0; strata::core::card_free_bytes(cb)) fb = std::min(fb, cb);
+            const int64_t free_mib = (int64_t) (fb >> 20);
+            if (free_mib >= vpr.low_mib) {
+                vpr.low_run = false;
+                vpr.said_floor = false;
+                if (kvg.vram_out <= 0 || free_mib < vpr.back_mib) {
+                    vpr.high_run = vpr.backing = false;
+                    return true;
+                }
+                if (!vpr.high_run) {
+                    vpr.high_run = true;
+                    vpr.high_since = now;
+                }
+                if (!at_start || now - vpr.high_since < std::chrono::seconds(vpr.backing ? 10 : 30)) return true;
+                quiesce();
+                if (!kvg_trim(0, 0, std::min<int64_t>(vpr.step_chunks, kvg.vram_out))) return false;
+                ++vpr.grows;
+                vpr.backing = true;
+                vpr.high_since = now;
+                return true;
+            }
+            vpr.high_run = vpr.backing = false;
+            if (!vpr.low_run) {
+                vpr.low_run = true;
+                vpr.low_since = now;
+            }
+            // below half the low line it acts at once: the card is about to page (a window that waits on WDDM then
+            // stalls for good, 11/18)
+            if (vpr.said_floor ||
+                (!at_start && free_mib >= vpr.low_mib / 2 && now - vpr.low_since < std::chrono::seconds(2)))
+                return true;
+            std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: %lld MiB of VRAM free (below %lld MiB %s)\n",
+                         (long long) free_mib, (long long) vpr.low_mib,
+                         at_start ? "at a request's start" : free_mib < vpr.low_mib / 2 ? "- at once" : "for 2 s");
+            if (!kvg_ensure(0, quiesce, vpr.step_chunks)) {
+                vpr.said_floor = true;
+                std::fprintf(stderr, "strata serve: QuantLab: VRAM pressure: the expert cache has no more to give (%lld of "
+                                     "%lld slots hold experts, %lld MiB given back)\n",
+                             (long long) (kvg.lo + (xcache.slots() - kvg.top)), (long long) xcache.slots(),
+                             (long long) (((uint64_t) kvg.vram_out * strata::core::vmm_granularity()) >> 20));
+                return true;
+            }
+            ++vpr.shrinks;
+            vpr.low_since = now;   // between windows the next step waits for the low to last again
+        }
         return true;
     };
     // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
@@ -10063,6 +10329,9 @@ int main(int argc, char** argv) {
             int32_t first_now = -1;        // where its buffers are laid out now
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
+            bool lent_lm = false;          // QuantLab pf-smooth: the loan holds a layer-major super-chunk too
+            int32_t lm_first = -1;         // ... and holds the slots [lm_first, lm_end) (an owned layout's: the super-chunk's
+            int32_t lm_end = -1;           //     alone, below the elastic K/V when it took the top slots)
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -10413,7 +10682,15 @@ int main(int argc, char** argv) {
                                  (long long) (borrowed - kept), (long long) borrowed);
             }
         } else {
-            std::fprintf(stderr, "strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
+            // QuantLab (11/18): what is free before them - they are not in the expert cache's sizing (it priced a loan), so
+            // they come out of the VRAM reserve (an RTX 3080 held to 8 GB, reserve 1024, a 1024-token chunk: 97-401 MiB
+            // left with everything loaded)
+            size_t fb_own = 0, tb_own = 0;
+            if (cudaMemGetInfo(&fb_own, &tb_own) != cudaSuccess) { (void) cudaGetLastError(); fb_own = 0; }
+            fb_own = std::min(fb_own, strata::core::device_free_bytes());
+            std::fprintf(stderr, "strata serve: the prompt path allocates its own buffers (too few cache slots to borrow): a "
+                                 "%lld-token chunk, %lld MiB of VRAM free before them\n",
+                         (long long) o.prefill_chunk, (long long) (fb_own >> 20));
         }
         rss_probe("the prompt path set up");
         // layer split across GPUs: a prompt path per stage, each handing its chunk's rows to the next.
@@ -10548,6 +10825,98 @@ int main(int argc, char** argv) {
             }
         }
         mem_mark("the head and the prompt path");
+        // QuantLab pf-smooth (11/17; the gate 11/18): a card whose long prompts wait on the experts it streams reads them
+        // layer-major (Prefill::run_layer_major: each layer's experts once per super-chunk of the prompt instead of once
+        // per chunk), the super-chunk's buffers in the request's loan (lend, below), so the walk takes no VRAM beside the
+        // expert cache.  The gate prices one chunk of the chunk walk as the host-aware plan does (prefill_plan.hpp
+        // price(): the experts the GPU caches do not hold, streamed over PCIe, beside the compute) and turns the walk on
+        // when the stream is at least STRATA_PREFILL_LM_AUTO_SHARE of that chunk's time (default 0.35).  It used to ask
+        // for a start-up chunk of at most 2048 tokens, but the chunk an 8 GB card starts with moves with the VRAM reserve
+        // and the K/V's loan (768 / 256 / 1024 tokens at a reserve of 256 / 512 / 768 MiB, 11/17 night), and at 3328
+        // tokens the chunk walk still waits on the stream.  The share follows the bytes: an RTX 3080 held to 8 GB
+        // (Sync-XS, a 1024-3328-token chunk) prices 0.39-0.67 and reads in layer-major; 10-12 GB (4608-8192 tokens,
+        // 0.20-0.33) keeps the chunk walk by the share alone - but a card of at most 12 GiB reads layer-major anyway since
+        // 11/18 (small_card below: measured faster on 12 GB, decode equal).  On one GPU with a loan,
+        // and when the walk runs this model's experts.  An explicit STRATA_PREFILL_LAYER_MAJOR (1: the opt-in walk as
+        // before, 0: off) wins; STRATA_PREFILL_LM_AUTO_CHUNK=N (tokens) is the old rule (a start-up chunk of at most N;
+        // 0: off).  Measured on an RTX 3080 held to 7 GiB, Sync-S, 19.6K prompt: 381 -> 1,607 tok/s.
+        bool pf_lm_auto = false;
+        {
+            const char* lv = std::getenv("STRATA_PREFILL_LAYER_MAJOR");
+            const char* cv = std::getenv("STRATA_PREFILL_LM_AUTO_CHUNK");
+            const char* shv = std::getenv("STRATA_PREFILL_LM_AUTO_SHARE");
+            // the start-up chunk (not the host-aware plan's smaller one for a file tier the page cache cannot hold: with it a
+            // 12 GB card's walk would change, and the plan's chunk is only for the prompts past the start-up one)
+            const int64_t walk_chunk = o.prefill_chunk;
+            double share = -1.0, stream_gib = 0.0, h2d = 12.0;
+            if (pf_parts.size() == 1 && walk_chunk > 0) {
+                const auto& lay = strata::kernels::cpu::expert_layout();
+                uint64_t total = 0;
+                for (int64_t l = 0; l < g.n_layers; ++l) total += lay.layer_bytes(l);
+                const uint64_t gc = (uint64_t) std::max<int64_t>(0, (int64_t) pf_parts[0].cache->bytes());
+                h2d = g_last_h2d_gbps > 0.0 ? g_last_h2d_gbps : 12.0;
+                double toks = 1200.0;   // the plan's compute rate (STRATA_PREFILL_PLAN_TOKS)
+                if (const char* e = std::getenv("STRATA_PREFILL_PLAN_TOKS"); e != nullptr && std::atof(e) > 0.0)
+                    toks = std::atof(e);
+                const double stream_b = total > gc ? (double) (total - gc) : 0.0;
+                stream_gib = stream_b / 1073741824.0;
+                const double stream_s = stream_b / (h2d * 1e9);
+                const double compute_s = (double) walk_chunk / toks;
+                share = stream_s + compute_s > 0.0 ? stream_s / (stream_s + compute_s) : 0.0;
+            }
+            double min_share = 0.35;
+            if (shv != nullptr && shv[0] != '\0') min_share = std::atof(shv);
+            // QuantLab (11/18, the owner: "A on 12 GB too"): a card of at most STRATA_PREFILL_LM_AUTO_GIB GiB (default 12;
+            // 0: off) reads layer-major whatever its share.  Measured on an RTX 3080 12 GB, Sync-S, 262144 k8v4, reserve
+            // 768, A against B 4 times each (share 20%): prefill 1k +25%, 13K +19%, 30K +10%, a 7.2K dsh prompt +21%;
+            // decode equal (jbench R4 142.6 / 142.3 tok/s, the dsh conversation's 400-token answers 91.9 / 91.0).
+            // A larger card keeps the share rule (unmeasured there).
+            double small_gib = 12.0;
+            if (const char* gv = std::getenv("STRATA_PREFILL_LM_AUTO_GIB"); gv != nullptr && gv[0] != '\0') small_gib = std::atof(gv);
+            double card_gib = 0.0;
+            {
+                size_t fb = 0, tb = 0;
+                if (cudaMemGetInfo(&fb, &tb) == cudaSuccess) card_gib = (double) tb / 1073741824.0;
+                else (void) cudaGetLastError();
+            }
+            const bool small_card = small_gib > 0.0 && card_gib > 0.0 && card_gib <= small_gib + 0.25;
+            const bool by_chunk = cv != nullptr && cv[0] != '\0';
+            const int64_t lm_max_chunk = by_chunk ? (int64_t) std::atoll(cv) : 0;
+            char said[200];
+            std::snprintf(said, sizeof said, "a %lld-token chunk streams %.1f GiB at %.1f GB/s, %.0f%% of its time",
+                          (long long) walk_chunk, stream_gib, h2d, share >= 0.0 ? 100.0 * share : 0.0);
+            const bool want = by_chunk ? (lm_max_chunk > 0 && o.prefill_chunk <= lm_max_chunk)
+                                       : (share >= 0.0 && ((min_share > 0.0 && share >= min_share) || small_card));
+            if (lv != nullptr && lv[0] != '\0') {
+                std::fprintf(stderr, "strata serve: QuantLab pf-smooth: STRATA_PREFILL_LAYER_MAJOR=%s decides (%s)\n", lv, said);
+            } else if (want) {
+                std::string why;
+                if (pf_parts.size() != 1) why = "no expert cache to lend from on one GPU";
+                else if (multi_gpu || peer.valid()) why = "more than one GPU";
+                else if (sp.layer_major_supported(why)) pf_lm_auto = true;
+                if (pf_lm_auto && by_chunk)
+                    std::fprintf(stderr, "strata serve: QuantLab pf-smooth: prompts of 2 chunks or more read layer-major (the "
+                                         "start-up chunk is %lld tokens, STRATA_PREFILL_LM_AUTO_CHUNK %lld; %s): each layer's "
+                                         "experts once per super-chunk, its buffers in the prompt's loan (STRATA_PREFILL_LAYER_MAJOR=0: off)\n",
+                                 (long long) o.prefill_chunk, (long long) lm_max_chunk, said);
+                else if (pf_lm_auto)
+                    std::fprintf(stderr, "strata serve: QuantLab pf-smooth: prompts of 2 chunks or more read layer-major (%s; "
+                                         "on from %.0f%%, or on a card of at most %.0f GiB - this one %.1f GiB): each layer's "
+                                         "experts once per super-chunk, its buffers in the prompt's loan "
+                                         "(STRATA_PREFILL_LAYER_MAJOR=0: off)\n",
+                                 said, 100.0 * min_share, small_gib, card_gib);
+                else
+                    std::fprintf(stderr, "strata serve: QuantLab pf-smooth: prompts stay on the chunk walk: %s\n", why.c_str());
+            } else if (by_chunk) {
+                std::fprintf(stderr, "strata serve: QuantLab pf-smooth: prompts stay on the chunk walk (the start-up chunk is "
+                                     "%lld tokens, STRATA_PREFILL_LM_AUTO_CHUNK %lld; %s)\n",
+                             (long long) o.prefill_chunk, (long long) lm_max_chunk, said);
+            } else if (share >= 0.0) {
+                std::fprintf(stderr, "strata serve: QuantLab pf-smooth: prompts stay on the chunk walk (%s; layer-major "
+                                     "from %.0f%%, or on a card of at most %.0f GiB - this one %.1f GiB)\n", said,
+                             100.0 * min_share, small_gib, card_gib);
+            }
+        }
         // #340: STRATA_SPLIT_SMALL_OWN=S (tokens): on a layer split, every stage that borrows keeps the slots for an
         // S-token chunk's buffers for the whole session (0.1.29's own buffers, carved from the tail of its cache):
         // a request of at most S prompt tokens then lends, streams and refills nothing, a longer one lends (and
@@ -10597,8 +10966,13 @@ int main(int argc, char** argv) {
                 for (int64_t c = 256; c <= mc; c += 256) keep = std::max<int64_t>(keep, part_slots(pf_parts[0], c));
                 if (keep > 0 && keep + 128 <= xcache.slots()) top_cap = std::max<int64_t>(lend_first, xcache.slots() - keep);
                 kvg.loan_min_chunk = mc;
+                // QuantLab (11/18): the VRAM pressure's own cap, a 256-token chunk's room (kvg.top_cap_vpr)
+                const int64_t keep256 = part_slots(pf_parts[0], 256);
+                if (keep256 > 0 && keep256 + 128 <= xcache.slots())
+                    kvg.top_cap_vpr = std::max<int64_t>(lend_first, xcache.slots() - keep256);
             }
             kvg_start(borrow != nullptr ? (int64_t) lend_first : xcache.slots(), top_cap);
+            vpr_start();   // QuantLab (11/18): the VRAM pressure (after the elastic K/V)
         }
         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
@@ -10832,6 +11206,10 @@ int main(int argc, char** argv) {
         ver.set_remote_expert_opt(remote_opt.get());
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
+#if defined(STRATA_HAVE_DFLASH2)
+        // QuantLab (11/16): DFlash2 in the serve loop reads the completed outputs of its 5 layers for every window row (one stage only)
+        if (use_df2 && n_stages == 1 && !pipe && o.batch == 0) ver.set_taps(df2.tap_layers());
+#endif
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,
                       batch_max_t(), err) ||
             (use_mtp && !prefill_head_alias_bound && !mtp.bind(last_st && !mtp_first ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
@@ -10841,6 +11219,33 @@ int main(int argc, char** argv) {
         }
         if (prefill_head_alias_bound) mtp.set_window_R(ver.final_R_all());
         if (pipe) mtp.set_source_R(ver.final_R_all());   // the serial decode's rows (the last stage's even verifier)
+#if defined(STRATA_HAVE_DFLASH2)
+        if (use_df2) {   // QuantLab (11/16): the serve loop's DFlash2 (the CLI's order: taps, init, bind, graphs on the drafter's own taps)
+            const char* df2_mem = use_mtp ? "It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring 0.25 GiB, a draft head 0.2 GiB); "
+                                            "--vram-reserve-mib 1900 keeps it. The MTP drafts instead."
+                                          : "It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring 0.25 GiB, a draft head 0.2 GiB); "
+                                            "--vram-reserve-mib 1900 keeps it. Only the lookup drafts.";
+            df2.set_max_drafts(std::min({o.spec, 8, df2_cap > 0 ? df2_cap : o.spec}) - 1);   // upstream d7e50a51: the widest DFlash2 window - 1 (the serve loop's S_df2: --spec, 8 rows, --draft-cap), the head and the walk run for that many rows (before the graphs)
+            if (n_stages != 1 || pipe || o.batch > 0 || !ver.tapping()) {
+                std::fprintf(stderr, "strata serve: --draft dflash2: the verifier keeps no taps here (one card, no --batch); %s\n",
+                             use_mtp ? "the MTP drafts instead" : "only the lookup drafts");
+                use_df2 = false;
+            } else if (!df2.bind(wt, &native_head, o.mtp_draft_vocab.empty() ? o.mtp + "/draft_vocab.bin" : o.mtp_draft_vocab, err)) {
+                std::fprintf(stderr, "strata serve: --draft dflash2: %s. %s\n", err.c_str(), df2_mem);
+                use_df2 = false;
+            } else if (!df2.prepare_own(err)) {
+                std::fprintf(stderr, "strata serve: --draft dflash2: %s. %s\n", err.c_str(), df2_mem);
+                use_df2 = false;
+            } else {
+                std::fprintf(stderr, "strata serve: DFlash2 drafter on (%s, graphs captured in %.0f ms, %.0f MiB of VRAM), windows up to %d tokens, "
+                                     "%s; %s\n", o.draft_model.c_str(), df2.ms_capture,
+                             (double) df2.vram_bytes() / 1048576.0, df2_cap > 0 ? std::min(df2_cap, o.spec) : std::min(o.spec, 8),
+                             o.draft_conf > 0.0 ? "the window ends where the product of the selector's probabilities falls below --draft-conf"
+                                                : "each draft kept while its probability reaches --spec-min-p",
+                             use_mtp ? "the MTP layer stays as the fallback" : "no MTP layer (its VRAM went to the expert cache)");
+            }
+        }
+#endif
         auto free_slot_mtp_rows = [](float* p) { if (p != nullptr) (void) cudaFree(p); };
         std::vector<std::unique_ptr<float, decltype(free_slot_mtp_rows)>> slot_mtp_rows;
         if (batch_mtp) {
@@ -11027,6 +11432,13 @@ int main(int argc, char** argv) {
         // shares that prefix mounts through it instead of reading it again.
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
+#if defined(STRATA_HAVE_DFLASH2)
+        // QuantLab (11/16) DFlash2 in the serve loop: the tokens (and images) of the conversation whose rows the drafter's ring holds, as `live`
+        // was when the last request ended, and the end of the rows fed without a gap (the ring is valid in [df2.floor(), df2_end))
+        std::vector<int32_t> df2_live;
+        std::vector<ImgKey> df2_live_imgs;
+        int64_t df2_end = 0;
+#endif
         bool live_ok = false;
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
@@ -11363,10 +11775,33 @@ int main(int argc, char** argv) {
                 // limits above the engine, --memory-limit-mib); `mem` keeps the last one for the refusal line.
                 size_t evicted = 0;
                 std::optional<strata::core::HostMemoryReading> mem;
+                // QuantLab 11/18: with the file tier read through the file cache (Windows), its mapped pages stay in this
+                // process's working set and the available RAM leaves them out (0.3-0.7 GiB available against 7-9 unbuffered,
+                // measured), so parked conversations were evicted for RAM that Windows gives back from those clean pages on
+                // demand.  Added to the RAM side of the reading when the plain one says no (read once a park; 0 when
+                // nothing is mapped, so an unbuffered file tier and Linux decide as before); the commit side still bounds
+                // it (sample_host_memory_reclaim: min(RAM + these pages, commit), #1607).  The cache's own budget, sized
+                // from the free RAM at the start, still bounds what is parked.
+                uint64_t own_reclaim = 0;
+                bool own_read = false, own_used = false;
                 auto admit = [&] {
                     mem = strata::core::sample_host_memory();
-                    return strata::core::conversation_memory_admit(
-                        mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
+                    std::optional<uint64_t> avail = mem ? std::optional<uint64_t>(mem->available) : std::nullopt;
+                    if (avail && file_srcp != nullptr && srcp == file_srcp &&
+                        !strata::core::conversation_memory_admit(avail, additional, floor)) {
+                        if (!own_read) {
+                            own_reclaim = file_srcp->reclaimable_mapped_bytes();
+                            own_read = true;
+                        }
+                        if (own_reclaim > 0) {
+                            if (auto with = strata::core::sample_host_memory_reclaim(own_reclaim)) {
+                                avail = with->available;
+                                own_used = strata::core::conversation_memory_admit(avail, additional, floor);
+                                if (own_used) mem = with;
+                            }
+                        }
+                    }
+                    return strata::core::conversation_memory_admit(avail, additional, floor);
                 };
                 while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
                        conversations.evict_oldest())
@@ -11377,6 +11812,10 @@ int main(int argc, char** argv) {
                                  evicted, conversations.size());
                     return true;
                 }
+                if (own_used)
+                    std::fprintf(stderr, "strata serve: conversation cache: admitted with %llu MiB of the file tier's mapped pages "
+                                         "counted as RAM Windows gives back (%s)\n",
+                                 (unsigned long long) (own_reclaim >> 20), ram_note(mem).c_str());
                 if (evicted)
                     std::fprintf(stderr, "strata serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
                                  evicted, evicted == 1 ? "" : "s", additional >> 20,
@@ -11419,7 +11858,17 @@ int main(int argc, char** argv) {
                         return false;
                     image.stage_images.push_back(std::move(part));
                 }
-                const auto mem_after = strata::core::sample_host_memory();
+                auto mem_after = strata::core::sample_host_memory();
+                // QuantLab 11/18: the floor after the capture counts the file tier's mapped pages on the RAM side too (as the
+                // admission above; the commit side still bounds it): measured, 1-2 of 9 parks were skipped here with
+                // 57-251 MiB available beside ~9 GiB of them
+                if (!strata::core::conversation_memory_admit(
+                        mem_after ? std::optional<uint64_t>(mem_after->available) : std::nullopt, 0, floor) &&
+                    mem_after && file_srcp != nullptr && srcp == file_srcp) {
+                    const uint64_t own_now = file_srcp->reclaimable_mapped_bytes();
+                    if (own_now > 0)
+                        if (auto with = strata::core::sample_host_memory_reclaim(own_now)) mem_after = with;
+                }
                 if (!strata::core::conversation_memory_admit(
                         mem_after ? std::optional<uint64_t>(mem_after->available) : std::nullopt, 0, floor)) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (RAM floor after capture: %lld MiB needed, %s)\n",
@@ -13074,8 +13523,23 @@ int main(int argc, char** argv) {
             // slow, not stuck; it gets up to STRATA_WATCHDOG_IO_S (default 10 x the limit) of such time. 0 = no allowance.
             const char* wio = std::getenv("STRATA_WATCHDOG_IO_S");
             const int io_limit = wio ? std::atoi(wio) : limit * 10;
+            // QuantLab (11/18): with the whole card's VRAM full (NVML: below 128 MiB free - 88 MiB in the stall seen), a step silent for
+            // STRATA_QL_STALL_FULL_S (default 10; 0: off) is the WDDM stall - the driver pages while the GPU spins on the
+            // window's flags, the copies that raise them wait on the paging, and nothing moves until the GPU waits are
+            // released, after which the engine must start again (#267).  It stops then instead of after `limit` s: the
+            // same restart, ~50 s sooner.  (Another program taking more VRAM than the card has, at once, 11/18.)
+            const char* wfull = std::getenv("STRATA_QL_STALL_FULL_S");
+            const int full_limit = wfull ? std::atoi(wfull) : 10;
+            // QuantLab (11/18) STRATA_QL_WINDOW_REDO (default on): a verify window silent for STRATA_QL_REDO_S (default 3) on a
+            // full card (NVML below 128 MiB free; STRATA_QL_REDO_TEST=1: any card, for STRATA_TEST_VERIFY_STALL) has its GPU
+            // waits released - the WDDM paging then finishes - and the decode loop runs that window again
+            // (Verifier::recover_after_release) instead of the engine ending.  Once per silent stretch; if the step still
+            // does not move, the rules above end the engine as before.
+            const char* wredo = std::getenv("STRATA_QL_REDO_S");
+            const int redo_s = strata::core::ql_window_redo_on() ? (wredo ? std::atoi(wredo) : 3) : 0;
+            static const bool redo_test = [] { const char* v = std::getenv("STRATA_QL_REDO_TEST"); return v != nullptr && v[0] == '1'; }();
             if (limit > 0)
-                std::thread([limit, io_limit] {
+                std::thread([limit, io_limit, full_limit, redo_s] {
                     strata::platform::name_this_thread("strata-watchdog");
                     strata::aux_cpus::pin_current_thread();
                     strata::core::Progress& p = strata::core::progress();
@@ -13085,18 +13549,44 @@ int main(int argc, char** argv) {
                     uint64_t io_last = file_tier_activity();
                     auto io_active_at = since;   // the last second the file tier was busy
                     bool io_noted = false;
+                    bool redo_done = false;   // QuantLab (11/18): the soft release ran for this silent stretch
                     for (;;) {
                         std::this_thread::sleep_for(std::chrono::seconds(1));
                         const auto now = std::chrono::steady_clock::now();
                         const uint64_t b = p.beats.load();
-                        if (!p.busy.load() || b != last) { last = b; ticks_at = p.ticks.load(); since = now; io_since = now; io_active_at = now; io_noted = false; io_last = file_tier_activity(); continue; }
+                        if (!p.busy.load() || b != last) { last = b; ticks_at = p.ticks.load(); since = now; io_since = now; io_active_at = now; io_noted = false; io_last = file_tier_activity(); redo_done = false; continue; }
+                        if (redo_s > 0 && !redo_done && now - since >= std::chrono::seconds(redo_s) &&
+                            stage_text().rfind("verify window", 0) == 0) {
+                            size_t cb = 0;
+                            const bool full = strata::core::card_free_bytes(cb) && (cb >> 20) < 128;
+                            const bool armed = strata::core::progress_now_ms() < g_ql_redo_armed_ms.load();
+                            if (full || redo_test || armed) {
+                                redo_done = true;
+                                g_ql_redo_armed_ms.store(strata::core::progress_now_ms() + 30000);
+                                std::fprintf(stderr, "strata serve: QuantLab: a verify window has not moved for %d s (%s; %s): "
+                                                     "its GPU waits are released and the window runs again "
+                                                     "(STRATA_QL_WINDOW_REDO)\n", redo_s, stage_text().c_str(),
+                                             full ? ("the card's VRAM is full, " + std::to_string((long long) (cb >> 20)) +
+                                                     " MiB free").c_str() : armed ? "a window released within 30 s" : "STRATA_QL_REDO_TEST");
+                                strata::core::release_gpu_waits(stderr);
+                                std::fflush(stderr);
+                                since = now;   // the abort rules count again from here
+                                continue;
+                            }
+                        }
                         {   // sampled every second, also during the first `limit` seconds, so a busy file tier is seen
                             const uint64_t a = file_tier_activity();
                             if (a >= io_last + 16) io_active_at = now;   // 16 = faults + MiB read in a second: busy
                             io_last = a;
                         }
-                        if (now - since < std::chrono::seconds(limit)) continue;
-                        if (io_limit > limit && now - io_since < std::chrono::seconds(io_limit)) {
+                        int64_t full_mib = -1;   // QuantLab (11/18): the card's free VRAM when the full-card rule fired
+                        if (now - since < std::chrono::seconds(limit)) {
+                            if (full_limit <= 0 || full_limit >= limit || now - since < std::chrono::seconds(full_limit)) continue;
+                            size_t cb = 0;
+                            if (!strata::core::card_free_bytes(cb) || (cb >> 20) >= 128) continue;
+                            full_mib = (int64_t) (cb >> 20);
+                        }
+                        if (full_mib < 0 && io_limit > limit && now - io_since < std::chrono::seconds(io_limit)) {
                             // a thrashing host has seconds with almost no reads (one thread waiting on one page while
                             // swap is written): busy within the last 10 s still counts as slow, not stuck (P2003, 46 GB)
                             if (now - io_active_at < std::chrono::seconds(10)) {
@@ -13111,9 +13601,13 @@ int main(int argc, char** argv) {
                         }
                         // a blocking step's explicit allowance (session files): still within it, not yet stuck
                         if (strata::core::progress_now_ms() < p.allow_until_ms.load()) continue;
+                        if (full_mib >= 0)
+                            std::fprintf(stderr, "strata serve: QuantLab: the card's VRAM is full (%lld MiB free, NVML) and no "
+                                                 "step finished for %d s: the WDDM stall (STRATA_QL_STALL_FULL_S)\n",
+                                         (long long) full_mib, full_limit);
                         std::fprintf(stderr, "strata serve: no progress for %d s during a request (%s) - stopping "
                                              "the engine so the server starts it again (issue #29)%s\n",
-                                     limit, stage_text().c_str(),
+                                     full_mib >= 0 ? full_limit : limit, stage_text().c_str(),
                                      launch_blocking() ? "; CUDA_LAUNCH_BLOCKING=1 is set, and no verify window can "
                                                          "finish with it (#1341)" : "");
                         stall_report(stderr, p.ticks.load() - ticks_at);
@@ -15673,6 +16167,41 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            // QuantLab (11/18): the VRAM pressure at a request's start: a step down at once when VRAM is short, a step
+            // back once it has stayed free
+            if (vpr.on && !vpr_tick(true, kv_quiesce)) {
+                std::printf("ERR the expert cache could not take its VRAM back\n");
+                std::fflush(stdout);
+                return 1;
+            }
+            // QuantLab (11/18): every window size's graph before the request's first window.  A capture takes VRAM (14-26
+            // MiB a size); one taken mid-answer on a card another program had just filled went past the card: WDDM paged
+            // while the GPU spun on the window's flags, the copies that raise them waited on the paging, and the window
+            // never finished (60 s, a restart - twice on 11/18, 12 GB and 8 GB).  Captured here, a decode window allocates
+            // nothing new.  A size whose graph finds no VRAM is dropped, as on first use.  With the VRAM pressure on only
+            // (the same graphs as before, captured earlier).
+            if (vpr.on && n_stages == 1) {
+                int took = 0;
+                for (int t = 1; t <= S; ++t) {
+                    if (!policy.allowed(t)) continue;
+                    bool no_vram = false;
+                    std::string perr;
+                    if (ver.prepare(t, no_vram, perr)) {
+                        ++took;
+                        continue;
+                    }
+                    if (no_vram) {
+                        policy.disable(t);
+                        std::fprintf(stderr, "strata serve: no VRAM for the %d-token window graph: that size is dropped, "
+                                             "sizes left %s (a larger --vram-reserve-mib keeps it)\n", t,
+                                     size_list(policy.sizes(), S).c_str());
+                    } else {
+                        std::fprintf(stderr, "strata serve: QuantLab: the %d-token window graph was not captured ahead (%s): "
+                                             "it is captured on first use\n", t, perr.c_str());
+                    }
+                }
+                (void) took;
+            }
             int64_t reread_to = -1;   // STRATA_CKPT_REREAD only: read [0, reread_to) again instead of restoring
             if (resume == 0) {
                 strata::core::session_zero(ss, g, nullptr, main_cs);
@@ -15768,6 +16297,31 @@ int main(int argc, char** argv) {
             if (use_mtp && mtp.cell_floor_enabled())
                 mtp.set_cell_floor(resume > 0 && reread_to <= 0 ? kva_floors.floor_for(ids.data(), resume) : 0);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
+#if defined(STRATA_HAVE_DFLASH2)
+            // QuantLab (11/16) DFlash2: the ring goes on only when this request continues the very conversation it was fed last (the live
+            // session, the same tokens, no row missing up to read_from); anything else - a fresh read, a checkpoint, a parked conversation,
+            // a session file, a re-read - starts its context at read_from (the floor keeps the older slots out of the attention).  The
+            // prompt rows the first draft looks back on, [df2_from, n - 1), are fed as they are read; the last prompt token's row comes with
+            // the first window, as in the CLI.
+            const int64_t df2_from = use_df2 ? std::max<int64_t>(read_from, n - 2047) : INT64_MAX;
+            if (use_df2) {
+                const bool keep = from_live && reread_to <= 0 && read_from > 0 && read_from <= df2_end && live == df2_live &&
+                                  live_imgs == df2_live_imgs;
+                if (!keep) { df2.reset(); df2.set_floor(read_from); }
+                df2_end = read_from;   // (kept: the rows from read_from on are this request's, fed again below)
+            }
+            // the rows [pos0, pos0 + rows) of device taps ([rows][5][n_embd]): the ones at df2_from or later go into the ring
+            auto df2_feed = [&](const float* taps, int64_t rows, int64_t pos0, std::string& e) -> bool {
+                if (!use_df2) return true;
+                const int64_t lo = std::max(pos0, df2_from);
+                if (lo >= pos0 + rows) return true;
+                if (lo > df2_end) df2.set_floor(lo);   // a gap (rows the ring never saw): the context starts here
+                const size_t row = df2.tap_layers().size() * (size_t) df2.n_embd();
+                if (!df2.context(taps + (size_t) (lo - pos0) * row, pos0 + rows - lo, lo, e)) return false;
+                df2_end = pos0 + rows;
+                return true;
+            };
+#endif
             conversations.limit_reuse(read_from);
             pp_total = n;
             pp_from = read_from;
@@ -15981,6 +16535,9 @@ int main(int argc, char** argv) {
                     if (logpos != nullptr && !ver.window_logprobs(nxt.data(), T, q, logpos_extra, logpos, e))
                         return false;
                     if (!ver.commit(T, e) || (use_mtp && !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, e))) return false;
+#if defined(STRATA_HAVE_DFLASH2)
+                    if (use_df2 && !df2_feed(ver.tap_dev(), T, q, e)) return false;   // QuantLab (11/16): the window's rows into the ring
+#endif
                     q += T;
                     pp_reached = q;   // #471
                     pp_exact = true;
@@ -16150,6 +16707,8 @@ int main(int argc, char** argv) {
 #endif
                 p.lent.clear();
                 p.lent_chunk = 0;
+                p.lent_lm = false;
+                p.sp->set_layer_major_auto(false, 0);   // (its super-chunk lived in the loan: no walk without one)
                 return true;
             };
             auto refill_one = [&](PfPart& p, std::string& e) -> bool {
@@ -16187,6 +16746,9 @@ int main(int argc, char** argv) {
             // rounded up to 256), laid out in the last of the slots it may borrow - per participant, out of that
             // participant's own cache, and marking only that participant's own layers
             int64_t seg_lend = 0;   // the loan the last lend left (the largest participant's chunk; 0: none)
+            // QuantLab (11/17) DFlash2 on pf-smooth: the part being lent reads the drafter's prompt taps (read_part's set_taps), which
+            // layer-major does not take (lm_prepare refuses it), so its loan is the chunk walk's, not pf_lm_auto's super-chunk
+            bool lend_taps = false;
             auto lend = [&](int64_t tokens, std::string& e, int64_t exact) -> bool {
                 seg_lend = 0;
                 if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend
@@ -16205,8 +16767,118 @@ int main(int argc, char** argv) {
                     return false;
                 }
                 bool any = false;
+                // QuantLab pf-smooth (11/17): with pf_lm_auto, a segment of 2 chunks or more reads layer-major.  Its loan
+                // holds the T-token chunk's buffers and, past them, the super-chunk's (Prefill::layer_major_tail_bytes; the
+                // ring slots the walk leaves unused hold what fits there): the whole segment in one super-chunk with its
+                // rows in VRAM when the lendable slots allow it, else the most the walk can take (rows in pinned RAM).  T is
+                // the chunk walk's chunk up to 1024, or 512 when that takes fewer super-chunks.  The slots lendable are the
+                // auto scan's (at most kAutoLendPct %, 128 kept) above the elastic K/V (which grew for this prompt first).
+                // Anything else (a short segment, a picture, too few slots) reads in chunks as before.
+                // A cache too small to lend the chunk's buffers (the prompt path owns them, p.first < 0) lends slots for the
+                // super-chunk alone, at the buffers' own chunk.
+                sp.set_layer_major_auto(false, 0);
+                if (pf_lm_auto && !lend_taps && pf_parts.size() == 1 && exact <= 0 && !o.prefill_head_alias && req_imgs.empty()) {
+                    using strata::prefill::Prefill;
+                    PfPart& p = pf_parts[0];
+                    const bool owned = p.first < 0;
+                    const int64_t slots = p.cache->slots();
+                    // the loan ends at the cache's end - or, for an owned layout beside the elastic K/V (whose cells then
+                    // take the top slots, kvg_start(slots)), where the K/V begins: the super-chunk's slots lie just below it
+                    const bool kv_q = kvg.on && kvg.ql && p.cache == &xcache && kvg.lo < kvg.top;
+                    const int64_t end = owned && kv_q ? kvg.lo : slots;
+                    auto bytes_between = [&](int64_t a, int64_t b) -> uint64_t {   // slots [a, b)
+                        return part_bytes(p, (int32_t) a) - (b < slots ? part_bytes(p, (int32_t) b) : 0);
+                    };
+                    int64_t budget = std::max<int64_t>(0, std::min(end - 128, kAutoLendPct * slots / 100));
+                    if (!owned && kv_q) budget = std::min<int64_t>(budget, slots - kvg.top);
+                    const uint64_t avail = budget > 0 ? bytes_between(end - budget, end) : 0;
+                    int64_t best_T = 0, best_k = 0;
+                    uint64_t best_need = 0;
+                    const int64_t t_max = owned ? p.sp->chunk()
+                                                : std::min<int64_t>(std::min<int64_t>(want, o.prefill_chunk), 1024) / 256 * 256;
+                    for (const int64_t T : {t_max, (int64_t) 512}) {
+                        if (T < 256 || T > t_max || tokens < 2 * T || (T == 512 && t_max == 512 && best_T == 512)) continue;
+                        if (owned && T != t_max) continue;
+                        const uint64_t base = owned ? 0 : Prefill::bytes_needed(g, *p.ses, T, srcp != nullptr) + (1ull << 20);
+                        if (base >= avail) continue;
+                        const uint64_t room = avail - base;
+                        const int64_t target = (tokens + T - 1) / T * T;
+                        int64_t k = 0;
+                        uint64_t need = 0;
+                        // the largest super-chunk with its rows in VRAM (the auto walk's mode, lm_prepare); pinned rows only
+                        // when not even 2 chunks fit so
+                        int64_t sv = target;
+                        while (sv >= 2 * T && Prefill::layer_major_tail_bytes(sv, T, true) > room) sv -= T;
+                        if (sv >= 2 * T) {
+                            k = (tokens + sv - 1) / sv;
+                            need = base + Prefill::layer_major_tail_bytes(sv, T, true);
+                        } else {
+                            int64_t s = target;
+                            while (s >= 2 * T && Prefill::layer_major_tail_bytes(s, T, false) > room) s -= T;
+                            if (s < 2 * T) continue;
+                            k = (tokens + s - 1) / s;
+                            need = base + Prefill::layer_major_tail_bytes(s, T, false);
+                        }
+                        if (best_T == 0 || k < best_k) { best_T = T; best_k = k; best_need = need; }
+                    }
+                    if (best_T > 0) {
+                        int64_t need_p = 0;   // the slots below `end` that hold best_need bytes
+                        while (need_p < budget && bytes_between(end - need_p, end) < best_need) ++need_p;
+                        if (bytes_between(end - need_p, end) < best_need) need_p = budget + 1;
+                        const int32_t first = (int32_t) (end - need_p);
+                        if (need_p > 0 && need_p <= budget) {
+                            if (!p.lent.empty() && !(p.lent_lm && p.lent_chunk == best_T && p.lm_first <= first))
+                                if (!refill_one(p, e)) return false;
+                            if (p.lent.empty()) {
+                                const strata::core::OnDevice on(p.dev);
+                                if (!owned && (best_T != p.sp->chunk() || first != p.first_now)) {
+                                    if (!p.sp->relayout(best_T, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
+                                    p.first_now = first;
+                                }
+                                p.lm_first = owned ? first : p.first_now;
+                                p.lm_end = (int32_t) end;
+                                for (int64_t l = p.lb; l < p.le; ++l)
+                                    for (int64_t ex = 0; ex < g.n_expert; ++ex) {
+                                        const size_t i = (size_t) (l * g.n_expert + ex);
+                                        if (host_res[i] >= p.lm_first && host_res[i] < p.lm_end) {
+                                            p.lent.emplace_back((int32_t) i, host_res[i]);
+                                            host_res[i] = strata::core::kNotResident;
+                                            any = true;
+                                        }
+                                    }
+                                p.lent_chunk = best_T;
+                                p.lent_lm = true;
+                            }
+                            p.sp->set_layer_major_auto(true, (tokens + best_T - 1) / best_T * best_T,
+                                                       owned ? p.cache->device_slot(p.lm_first) : nullptr,
+                                                       owned ? bytes_between(p.lm_first, p.lm_end) : 0);
+                            seg_lend = p.lent_chunk;
+                            if (any) res_upload();
+                            static int64_t said_T = -1, said_k = -1;
+                            if (said_T != best_T || said_k != best_k) {
+                                said_T = best_T;
+                                said_k = best_k;
+                                std::fprintf(stderr, "strata serve: QuantLab pf-smooth: a %lld-token prompt reads layer-major in "
+                                                     "%lld-token chunks, %lld super-chunk(s); the loan is %lld slots (%.2f GiB) of "
+                                                     "%lld lendable\n", (long long) tokens, (long long) best_T, (long long) best_k,
+                                             (long long) (p.lm_end - p.lm_first),
+                                             (double) bytes_between(p.lm_first, p.lm_end) / 1073741824.0, (long long) budget);
+                            }
+                            if (trace) {
+                                std::fprintf(stderr, "strata trace: lent %lld slots for %lld tokens (layer-major) in %.1f ms\n",
+                                             (long long) p.lent.size(), (long long) tokens,
+                                             std::chrono::duration<double, std::milli>(Clock::now() - t_ln).count());
+                                std::fflush(stderr);
+                            }
+                            return true;
+                        }
+                    }
+                }
                 for (PfPart& p : pf_parts) {
-                    if (p.first < 0) continue;
+                    if (p.first < 0) {   // (QuantLab pf-smooth: an owned layout's super-chunk loan goes back first)
+                        if (p.lent_lm && !p.lent.empty() && !refill_one(p, e)) return false;
+                        continue;
+                    }
                     if (!p.lent.empty()) {
                         if (want <= p.lent_chunk) continue;            // its current loan already covers this
                         // ONLY this participant's loan goes back: `refill` would return the other participants'
@@ -16300,6 +16972,17 @@ int main(int argc, char** argv) {
             // continues from the slot with the same chunks.  #656's cooperative preemption, with a slot as the park.
             int64_t req_chunk = 0, req_chunk_len = 0;   // the DONE line's chunk=: the longest batched segment's first chunk
             auto read_part = [&](int64_t a0, int64_t b0, std::string& e) -> bool {
+#if defined(STRATA_HAVE_DFLASH2)
+                // QuantLab (11/16): the prompt taps only on a part that reaches df2_from (the cut there keeps every part before it on the
+                // layer-major walk, which reads no taps); 2048 staging rows hold any chunk's rows from df2_from to n - 1
+                if (use_df2 && b0 > df2_from) {
+                    sp.set_taps(df2.tap_layers(), std::max(a0, df2_from), 2048);
+                    sp.on_taps = [&](const float* taps, int64_t rows, int64_t pos0, std::string& te) -> bool { return df2_feed(taps, rows, pos0, te); };
+                } else if (use_df2) {
+                    sp.set_taps({}, INT64_MAX, 2048);
+                    sp.on_taps = nullptr;
+                }
+#endif
                 // --prefill-pipe on a layer split: the segment's chunk is planned ONCE, on its whole length (or taken
                 // from the read it goes on from: resume_plan), and every run of it reads in that chunk (force_chunk) -
                 // the same chunks whether it is read in one run, in pieces beside decoding slots, or goes on after a
@@ -16824,7 +17507,12 @@ int main(int argc, char** argv) {
             ver.set_sampling(req_sp);
             if (pipe) ver_b.set_sampling(req_sp);   // (reaches the later stage's odd verifier)
             if (use_mtp) mtp.set_draft_sampling(req_sp);   // STRATA_SPEC_COUPLED=1: sampled drafts (a no-op otherwise)
-            const bool gated_proposal = use_mtp && mtp.prob() && strata::core::spec_gate_pick() &&
+#if defined(STRATA_HAVE_DFLASH2)
+            const bool req_df2 = use_df2;   // QuantLab (11/16): this request drafts with DFlash2 (no gated proposals, no MTP q)
+#else
+            const bool req_df2 = false;
+#endif
+            const bool gated_proposal = !req_df2 && use_mtp && mtp.prob() && strata::core::spec_gate_pick() &&
                 gated_proposal_usable(o.pipeline_windows < 2 && o.batch == 0 && n_stages == 1 && !multi_gpu && drive.d.remote_count == 0,
                                       o.lookup_chain, o.adapt_swaps, req_pcie_frac != 0.0 || o.pcie_frac_auto, spec_cost, S,
                                       req_spec_min_p);
@@ -16935,6 +17623,15 @@ int main(int argc, char** argv) {
                 cuts.push_back(pin_at);
                 std::sort(cuts.begin(), cuts.end());   // the skipped -1s first, n - 1 still last
             }
+#if defined(STRATA_HAVE_DFLASH2)
+            // QuantLab (11/16) DFlash2: a cut at df2_from (no checkpoint there): the read before it stays on the layer-major walk, the
+            // last part (at most 2047 tokens) is the one that carries the prompt taps
+            if (use_df2 && df2_from > read_from && df2_from < n - 1 &&
+                std::find(cuts.begin(), cuts.end(), df2_from) == cuts.end()) {
+                cuts.push_back(df2_from);
+                std::sort(cuts.begin(), cuts.end());
+            }
+#endif
             int64_t at = read_from;
             // STRATA_ADMIT_MERGE_FIRST: the last part, when it goes through the windows, leaves its last tokens (up to
             // max_t with the last prompt token) to the first window, which starts at merge_at (-1: the first window
@@ -16970,6 +17667,9 @@ int main(int argc, char** argv) {
                 // another, and the loan decides which experts are read in place: bits)
                 const int64_t plan_lend = resume_plan.chunk > 0 && at == resume_plan_at && to == resume_plan_end
                                               ? resume_plan.lend : 0;
+#if defined(STRATA_HAVE_DFLASH2)
+                lend_taps = use_df2 && to > df2_from;   // the same test as read_part's set_taps (b0 > df2_from)
+#endif
                 if (!win && !lend(to - at, err, plan_lend)) {
                     std::printf("ERR lending the prompt path its slots failed: %s\n", err.c_str());
                     return 1;
@@ -17816,6 +18516,28 @@ int main(int argc, char** argv) {
                     if (first_window && merge_T > 0) T = merge_T;   // STRATA_ADMIT_MERGE_FIRST: the prompt's last tokens ride in this window
                 } else {
                     T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
+#if defined(STRATA_HAVE_DFLASH2)
+                    if (req_df2 && !first_window) {
+                        // QuantLab (11/16): DFlash2's drafts (up to 7): its own cap (--draft-cap, else by card, else --spec, at most 8 rows),
+                        // the window ending where the product of the selector's probabilities falls below --draft-conf (the CLI's rule),
+                        // else each draft kept while its probability reaches spec_min_p
+                        const int S_df2 = std::max(1, std::min({S, (int) strata::core::Dflash2Drafter::kDrafts + 1, df2_cap > 0 ? df2_cap : S}));
+                        T = 1;
+                        if (o.draft_conf > 0.0) {
+                            double chain = 1.0;
+                            while (T < S_df2 && (chain *= (double) dprob[(size_t) T - 1]) >= o.draft_conf) ++T;
+                        } else if (req_spec_min_p > 0.0) {
+                            while (T < S_df2 && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
+                        } else {
+                            T = S_df2;
+                        }
+                        // --lookup-max-t: the window sizes are a set (the MTP's, MTP+1, MTP+2, --spec); the largest allowed one whose graph fits
+                        if (o.lookup_max_t > 0 && T > 1) {
+                            T = graph_fits(policy.fit(T));
+                            if (T < 0) { std::printf("ERR %s\n", err.c_str()); return 1; }
+                        }
+                    } else
+#endif
                     if (use_mtp && spec_cost && !first_window) {
                         T = std::clamp(chain_rows, 1, S_mtp);
                     } else if (use_mtp && req_spec_min_p > 0.0) {
@@ -17831,7 +18553,7 @@ int main(int argc, char** argv) {
                         // a probabilistic window must not condition the source on the draw: the policy copy fixed at the request's start
                         // chooses, and the lookup is taken without asking whether the MTP's first guess agrees
                         const bool probabilistic = use_mtp && mtp.prob();
-                        if (k > 0 && (probabilistic || !use_mtp || sbuf[0] == drafts[0])) {
+                        if (k > 0 && (probabilistic || (!use_mtp && !req_df2) || sbuf[0] == drafts[0])) {   // (QuantLab 11/16: DFlash2's first draft agrees)
                             const strata::spec::DraftPolicy::Pick pk = probabilistic
                                 ? source_policy.choose(S_mtp, k, sfx_match) : policy.choose(T, k, sfx_match);
                             if (pk.lookup) { T = pk.t; from_sfx = true; }
@@ -18104,14 +18826,19 @@ int main(int argc, char** argv) {
                     std::printf("ERR the K/V cannot grow: no VRAM is left\n");
                     return 1;
                 }
+                // QuantLab (11/18): the VRAM pressure between windows (a step down when VRAM stays short)
+                if (vpr.on && !vpr_tick(false, adapt_quiesce)) {
+                    std::printf("ERR the expert cache could not take its VRAM back\n");
+                    return 1;
+                }
                 tr("window", p, T);
                 const Clock::time_point tw0 = Clock::now();
                 // STRATA_SPEC_PROB: the MTP drafts' distributions q, judged by rejection sampling (core/spec_prob.hpp);
                 // a suffix window and the lookup chain's tail are point masses and keep the exact-match rule
                 // (never on a first window: a merged one holds prompt tokens, not drafts)
                 if (gated_proposal) ver.set_spec_proposal(proposal.n_q ? proposal.mu.data() : nullptr, proposal.n_q);
-                else if (use_mtp && mtp.prob() && !from_sfx && !first_window && T_mtp > 1) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
-                const auto decode_pool_fn = use_mtp && mtp.prob() ? invariant_win_pool_fn : win_pool_fn;
+                else if (!req_df2 && use_mtp && mtp.prob() && !from_sfx && !first_window && T_mtp > 1) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
+                const auto decode_pool_fn = use_mtp && mtp.prob() && !req_df2 ? invariant_win_pool_fn : win_pool_fn;
                 // QuantLab (11/12) STRATA_QL_PROFILE_WIN=A:B: cudaProfilerStart before decode window A and cudaProfilerStop
                 // after window B (served decode windows since the engine started, first windows of a request not
                 // counted), for ncu --profile-from-start off.  Unset: nothing.
@@ -18165,7 +18892,50 @@ int main(int argc, char** argv) {
                     }
                     pa_n = 0;
                 }
-                if (!ver.run(T, window.data(), p, decode_pool_fn, win_pool_user, outv.data(), err) || drive.d.failed) {
+                // QuantLab (11/18) STRATA_QL_WINDOW_REDO: the routing counts this window adds (they steer which missed experts
+                // later windows read on the CPU and which over PCIe), kept so a redo does not count the released window twice
+                static std::vector<float> usage_redo;
+                if (strata::core::ql_window_redo_on() && !drive.d.usage.empty()) usage_redo.assign(drive.d.usage.begin(), drive.d.usage.end());
+                bool win_ok = ver.run(T, window.data(), p, decode_pool_fn, win_pool_user, outv.data(), err) && !drive.d.failed;
+                // QuantLab (11/18) STRATA_QL_WINDOW_REDO: a window the stall watchdog released (the WDDM stall: another
+                // program took more VRAM than the card has) runs again, after its state is put back and the expert cache
+                // gave a step of VRAM back - not a one-token window that committed itself, and at most twice
+                for (int redo = 1; !win_ok && redo <= 2 && strata::core::ql_window_redo_on() && ver.was_released() &&
+                                   ver.redo_safe(T); ++redo) {
+                    std::string rerr;
+                    if (!ver.recover_after_release(rerr)) {
+                        err = rerr;
+                        break;
+                    }
+                    adapt_quiesce();
+                    if (vpr.on) {   // VRAM back first - only when the card is full (else the cache stays: the redo is the window's own arithmetic)
+                        size_t cb = 0;
+                        const bool got = strata::core::card_free_bytes(cb);
+                        const int64_t before_mib = got ? (int64_t) (cb >> 20) : -1;
+                        int steps = 0;
+                        // until a step's room is free again above the low line (another program took more than the card has:
+                        // what WDDM paged out of the engine has to come back), at most 4 steps
+                        while (got && steps < 4 && strata::core::card_free_bytes(cb) &&
+                               (int64_t) (cb >> 20) < vpr.low_mib + vpr.step_mib && kvg_ensure(0, adapt_quiesce, vpr.step_chunks))
+                            ++steps;
+                        if (steps > 0 || (got && before_mib < vpr.low_mib + vpr.step_mib))
+                            std::fprintf(stderr, "strata serve: QuantLab: before the redo the card had %lld MiB free; the expert cache gave %d step(s) back, "
+                                                 "%lld MiB free now\n", (long long) before_mib, steps,
+                                         (long long) (strata::core::card_free_bytes(cb) ? (int64_t) (cb >> 20) : -1));
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));   // the driver's paging settles first
+                    strata::core::progress_beat();   // the watchdog counts this redo's silence afresh (and may release it too)
+                    drive.d.failed = false;
+                    if (usage_redo.size() == drive.d.usage.size() && !usage_redo.empty())
+                        std::copy(usage_redo.begin(), usage_redo.end(), drive.d.usage.begin());
+                    if (gated_proposal) ver.set_spec_proposal(proposal.n_q ? proposal.mu.data() : nullptr, proposal.n_q);
+                    else if (!req_df2 && use_mtp && mtp.prob() && !from_sfx && !first_window && T_mtp > 1) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
+                    std::fprintf(stderr, "strata serve: QuantLab: the released %d-token window at position %lld runs again "
+                                         "(%d of 2; it failed with: %s)\n", T, (long long) p, redo, err.c_str());
+                    err.clear();
+                    win_ok = ver.run(T, window.data(), p, decode_pool_fn, win_pool_user, outv.data(), err) && !drive.d.failed;
+                }
+                if (!win_ok) {
                     std::printf("ERR %s\n", drive.d.failed && drive.d.fail ? drive.d.fail : err.c_str());
                     return 1;
                 }
@@ -18256,9 +19026,54 @@ int main(int argc, char** argv) {
                     mtp.set_draft_history(consumed.data(), (int64_t) consumed.size(), outv[(size_t) a]);
                 generation = {};   // a skipped or failed production must not expose an older q view
                 const GatedDraftLimit draft_limit(mtp, gated_proposal, S_mtp, p + a + 1, o.max_context);
+#if defined(STRATA_HAVE_DFLASH2)
+                // QuantLab (11/16) DFlash2: the window's a + 1 committed rows (their taps) go into the ring and the block anchored on the new
+                // token drafts the next window (the CLI's draft_next).  A window that ends the answer goes into the ring too, so the next
+                // request of this conversation continues from a ring with no row missing.  The PLE rows of the next window's tokens are read
+                // ahead as the MTP does while it drafts.
+                const bool drafted = req_df2 ? [&]() -> bool {
+                    const int rows = a + 1;
+                    if (p > df2_end) df2.set_floor(p);   // a gap (should not happen: the prompt and every window are fed)
+                    if (eos || produced_n >= max_new) {
+                        if (!df2.context_from(ver.tap_dev(), rows, p, err)) return false;
+                        df2_end = p + rows;
+                        return true;
+                    }
+                    int32_t dd[strata::core::Dflash2Drafter::kDrafts];
+                    float pp[strata::core::Dflash2Drafter::kDrafts];
+                    if (!df2.draft_from(ver.tap_dev(), rows, p, outv[(size_t) a], dd, pp, err)) return false;
+                    df2_end = p + rows;
+                    for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) { drafts[i] = dd[i]; dprob[i] = pp[i]; }
+                    for (size_t i = (size_t) strata::core::Dflash2Drafter::kDrafts; i < dprob.size(); ++i) dprob[i] = 0.0f;
+                    if (ss.ple.ready() && ss.ple.table != nullptr) {
+                        const int cap = std::min<int>({S, (int) strata::core::Dflash2Drafter::kDrafts + 1, df2_cap > 0 ? df2_cap : S});
+                        int n_pf = 0;
+                        double chain = 1.0;
+                        for (int t = 1; t < cap; ++t) {
+                            if (o.draft_conf > 0.0) { if ((chain *= (double) dprob[(size_t) t - 1]) < o.draft_conf) break; }
+                            else if (req_spec_min_p > 0.0 && dprob[(size_t) t - 1] < (float) req_spec_min_p) break;
+                            ++n_pf;
+                        }
+                        int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
+                        auto pf = [&](int32_t tok) {
+                            uint32_t rows16[strata::kernels::PLE_N_HEADS];
+                            strata::kernels::ngram_rows(&tok, prev, 1, ss.ple.consts, rows16);
+                            prev[0] = prev[1];
+                            prev[1] = tok;
+                            ss.ple.table->prefetch_rows(rows16);
+                        };
+                        pf(outv[(size_t) a]);
+                        for (int i = 0; i < n_pf; ++i) pf(drafts[(size_t) i]);
+                    }
+                    return true;
+                }() : (!use_mtp || eos || produced_n >= max_new ||
+                       mtp.draft_long(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p,
+                                      nullptr, gated_proposal ? &generation : nullptr));
+#else
                 const bool drafted = !use_mtp || eos || produced_n >= max_new ||
                                      mtp.draft_long(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p,
                                                     nullptr, gated_proposal ? &generation : nullptr);
+#endif
                 {
                     const Clock::time_point tw3 = Clock::now();
                     auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
@@ -18458,6 +19273,13 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
+#if defined(STRATA_HAVE_DFLASH2)
+            // QuantLab (11/16): the conversation the DFlash2 ring was fed (the next request keeps the ring only for this one, up to df2_end)
+            if (use_df2) {
+                if (live_ok) { df2_live = live; df2_live_imgs = live_imgs; }
+                else { df2_live.clear(); df2_live_imgs.clear(); df2_end = 0; }
+            }
+#endif
             if (nib::config().recheck && nib::any_on() && !cancelled) {
                 // STRATA_EXPERT_NIBBLE_RECHECK=1 (debug): every converted slot's hash again on its own device, against the
                 // hash recorded at load - a path that wrote a slot after the seal is found here
@@ -19423,7 +20245,10 @@ int main(int argc, char** argv) {
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
             use_df2 = false;
         }
-        if (use_df2 && !df2.prepare(ver.tap_dev(), err)) {
+        // QuantLab (11/16): the graphs on the drafter's own 8-row taps (prepare_own / draft_from): a window wider than 8 rows (--lookup-max-t,
+        // suffix drafts) puts its rows past the last 8 into the ring first instead of failing ("draft rows out of range", engine 2)
+        if (use_df2) df2.set_max_drafts(std::min(o.spec, 8) - 1);   // upstream d7e50a51: the widest window - 1 (--spec, already lowered to --draft-cap; before the graphs)
+        if (use_df2 && !df2.prepare_own(err)) {
             std::fprintf(stderr, "strata generate: --draft dflash2: %s. It needs about 1.2 GiB of VRAM in all (the pack 0.76 GiB, buffers and K/V ring "
                                  "0.25 GiB, a draft head 0.2 GiB); --vram-reserve-mib 1900 keeps it (the expert cache gives up about 2.5%% of its experts "
                                  "to the CPU). The MTP drafts instead.\n", err.c_str());
@@ -19781,7 +20606,7 @@ int main(int argc, char** argv) {
                 if (wait_commit_first && !ver.wait_commit(err)) return false;
                 int32_t dd[strata::core::Dflash2Drafter::kDrafts];
                 float pp[strata::core::Dflash2Drafter::kDrafts];
-                if (!df2.draft(ver.tap_dev(), a_ + 1, p, outv[(size_t) a_], dd, pp, err)) return false;
+                if (!df2.draft_from(ver.tap_dev(), a_ + 1, p, outv[(size_t) a_], dd, pp, err)) return false;
                 for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) { drafts[i] = dd[i]; dprob[i] = pp[i]; }
                 // what the MTP does while it drafts: the PLE rows of the tokens the next window will hold are read ahead
                 // (the window's gather would otherwise wait for them: 1.8 ms a round on strix)

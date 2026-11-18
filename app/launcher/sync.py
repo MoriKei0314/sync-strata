@@ -16,6 +16,9 @@
   sync status       動いているか，モデル，直近の速さと 1 窓の内訳
   sync api          ほかのハーネスからのつなぎ方（番地・モデル名・curl の例・環境変数）
   sync doctor       PC の状態と勧め（閉じると速くなるもの，pack の勧め，いま CPU・GPU を使っているほかのアプリ）
+  sync mem [--json]  いまのメモリの様子（RAM・コミット・VRAM，ほかのアプリの上位，Sync-Strata 自身の分）．画面の「メモリ」の欄の元（11/17 係 W5）
+  sync update check [--json] [--local]   落とさずに，新しい版と変わる部品を調べる（画面の「更新」の欄の元．11/18 係 W9）
+  sync update apply [--json]             閉じて更新する（切り離した係が，全て閉じる→更新→起こし直す．窓か端末に様子が出る）
   sync chat [--system 文] [--preset speed|quality]
                     端末でそのまま会話する（API に直接．終わるのは空行か Ctrl-C）
 
@@ -32,10 +35,21 @@ sys.path.insert(0, os.path.dirname(HERE))
 import sync_launch as L  # noqa: E402
 import wintune  # noqa: E402
 import sync_home as H  # noqa: E402
+import sync_i18n  # noqa: E402  11/17 I-10
+
+sync_i18n.set_from_argv(sys.argv)       # --lang en|ja
+if "--lang" in sys.argv:                # 下の各コマンドの引数に残さない
+    _i = sys.argv.index("--lang")
+    del sys.argv[_i:_i + 2]
+_print = print
+
+
+def print(*a, **kw):                    # noqa: A001  11/17 I-10: 英語の画面なら，出す前に英語にする
+    _print(*[sync_i18n.t(x) if isinstance(x, str) else x for x in a], **kw)
 
 
 def _port(argv):
-    return int(argv[argv.index("--port") + 1]) if "--port" in argv else 8080
+    return int(argv[argv.index("--port") + 1]) if "--port" in argv else H.effective()["api_port"]      # 11/18 W12: 既定は設定の番号（前は 8080 固定）
 
 
 def _key():
@@ -95,9 +109,9 @@ def cmd_doctor(argv):
     import sync_env      # 11/15 夜: 対応環境
     ev = sync_env.check()
     for it in ev["blockers"]:
-        print(" × " + sync_env.text(it))
+        print(" × " + sync_env.text(it, sync_i18n.lang()))
     for it in ev["warnings"] + ev["notes"]:
-        print(" ・" + sync_env.text(it))
+        print(" ・" + sync_env.text(it, sync_i18n.lang()))
     for x in d["advice"]:
         print(" ・" + x)
     w = wintune.watch(3)
@@ -125,7 +139,7 @@ def cmd_chat(argv):
         hdr["Authorization"] = "Bearer " + _key()
     while True:
         try:
-            u = input("あなた> ").strip()
+            u = input(sync_i18n.t("あなた> ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -265,7 +279,7 @@ def menu():
     for k, label, _ in MENU:
         print(f"  {k}  {label}")
     try:
-        c = input("番号を入れて Enter（そのまま Enter は 1）> ").strip() or "1"
+        c = input(sync_i18n.t("番号を入れて Enter（そのまま Enter は 1）> ")).strip() or "1"
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
@@ -276,7 +290,7 @@ def menu():
     else:
         rc = run(pick[0])
     try:
-        input("（Enter でこの窓を閉じます．始めた Strata は動いたままです．止めるのは 4）")
+        input(sync_i18n.t("（Enter でこの窓を閉じます．始めた Strata は動いたままです．止めるのは 4）"))
     except (EOFError, KeyboardInterrupt):
         print()
     return rc
@@ -289,9 +303,24 @@ def main():
     return run(argv)
 
 
+EN_USAGE = """sync up [--gui|--no-gui|--api-only] [--open] [--json] [--preset speed|quality] [--model auto|<id>] [--ram-max-gib N] [--vram-reserve-mib N]
+        [--context N] [--port 8080] [--host 127.0.0.1] [--api-key KEY] [--dry]     start the engine (and dsh); auto settings from this PC
+sync down [--engine|--dsh|--all]    stop        sync status [--json]    running? model, recent speed
+sync settings get|set <name> <value|auto>       sync gui-url    sync api    how to connect other tools    sync doctor    PC check and advice
+sync update check [--json] [--local]     look for a new version (downloads nothing)     sync update apply    close, update, start again
+sync chat [--system TEXT] [--preset speed|quality]     talk in the terminal (empty line or Ctrl-C ends)
+Add --lang en|ja to choose the language (default: English on a text-only console, TERM=linux; or set SYNC_LANG).
+The API is OpenAI-compatible (/v1/chat/completions, /v1/responses, /v1/models) and Anthropic-compatible (/v1/messages).
+To listen beyond 127.0.0.1, set STRATA_API_KEY first, then: sync up --host 0.0.0.0."""
+
+
+def _usage():
+    print(EN_USAGE if sync_i18n.use_en() else __doc__)
+
+
 def run(argv):
     if argv[0] in ("-h", "--help", "help"):
-        print(__doc__)
+        _usage()
         return 0
     cmd, rest = argv[0], argv[1:]
     if cmd == "up":
@@ -314,11 +343,17 @@ def run(argv):
     if cmd == "env":
         import sync_env
         return sync_env.cmd_env(rest)
+    if cmd == "mem":      # 11/17 係 W5: メモリの見える化（JSON 1 行．ASCII だけ）
+        import sync_mem
+        return sync_mem.main(rest)
+    if cmd == "update":   # 11/18 係 W9: 更新を画面から（確かめる・閉じて更新する）
+        import sync_update
+        return sync_update.main(rest)
     if cmd == "doctor":
         return cmd_doctor(rest)
     if cmd == "chat":
         return cmd_chat(rest)
-    print(__doc__)
+    _usage()
     return 2
 
 

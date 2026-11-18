@@ -87,12 +87,11 @@ function ctxLevel(c) {
 
 // The ring is drawn once and then only its arc, number and class change, so the busy arc keeps turning smoothly
 // while the header redraws (it does every few seconds).
-const RING_R = 12.5, RING_L = 2 * Math.PI * RING_R, BUSY_L = 2 * Math.PI * 15.2;
+const RING_R = 12.5, RING_L = 2 * Math.PI * RING_R;
 const RING_SVG = `<svg viewBox="0 0 32 32" class="ctx-ring" aria-hidden="true">
   <circle cx="16" cy="16" r="${RING_R}" class="ctx-track"/>
   <circle cx="16" cy="16" r="${RING_R}" class="ctx-arc" stroke-dasharray="0 ${RING_L.toFixed(2)}" transform="rotate(-90 16 16)"/>
-  <circle cx="16" cy="16" r="15.2" class="ctx-busy" stroke-dasharray="7 ${(BUSY_L - 7).toFixed(2)}"/>
-  <text x="16" y="16.6" class="ctx-num" text-anchor="middle" dominant-baseline="middle">—</text></svg>`;
+  <text x="16" y="16.6" class="ctx-num" text-anchor="middle" dominant-baseline="middle">—</text></svg><span class="spinner ctx-spin" aria-hidden="true"></span>`;
 
 function ctxRingUpdate(btn, c, busy) {
   if (!btn.querySelector(".ctx-ring")) btn.innerHTML = RING_SVG;
@@ -170,6 +169,16 @@ function ChatView(go, sessionId, subInfo) {
   const queue = h("div", { class: "queue" });
   // 11/2: the subagents of this conversation that run now, above the box (tap: the list of its subagents)
   const subBar = h("button", { class: "sub-bar hidden", type: "button", onclick: () => openSubsSheet() });
+  // 11/17 係 W6: the engine could not start again for lack of GPU memory (seat_short): suggest a lighter model above the box
+  const seatBar = h("div", { class: "seat-bar hidden" });
+  let seatSeen = false;   // a turn's error text said seat_short
+  const renderSeat = () => {
+    const st = Store.S.strata;
+    const show = SeatShort.noted() || (seatSeen && !(st && st.online));
+    seatBar.classList.toggle("hidden", !show);
+    if (show && !seatBar.firstChild) seatBar.replaceChildren(SeatShort.el());
+  };
+  const seatCheck = (text) => { if (SeatShort.has(text)) { seatSeen = true; renderSeat(); } return text; };
   const archivedBar = h("div", { class: "archived-bar hidden" },
     h("span", { class: "grow" }, tr("Archived. Restore it to continue.")),
     h("button", { class: "btn primary slim", type: "button", onclick: () => setArchived(sessionId, false) }, tr("Restore")));
@@ -194,7 +203,7 @@ function ChatView(go, sessionId, subInfo) {
     h("header", { class: "topbar" },
       h("button", { class: "icon-btn back-btn", type: "button", "aria-label": tr("Back"), onclick: () => go(subInfo ? Store.routeOf(subInfo.parentId) : "#/", "back"), html: ICONS.back }),
       h("button", { class: "topbar-center", type: "button", "aria-label": tr("Session actions"), onclick: () => openMenu() }, titleEl, subEl), meter, more),
-    scroller, jump, h("div", { class: "bottom" }, subBar, queue, archivedBar, composer.el));
+    scroller, jump, h("div", { class: "bottom" }, seatBar, subBar, queue, archivedBar, composer.el));
 
   let ready = false; // set once the opening snapshot is drawn: later entries rise in, the history does not
   let stopFollow = null;
@@ -344,7 +353,7 @@ function ChatView(go, sessionId, subInfo) {
       }
       case "turn/end": {
         const k = d.reason && d.reason.kind;
-        if (k === "error") return [h("div", { class: "marker bad" }, tr("Stopped with an error: {0}", [(d.reason.error && d.reason.error.message) || ""]))];
+        if (k === "error") return [h("div", { class: "marker bad" }, tr("Stopped with an error: {0}", [seatCheck((d.reason.error && d.reason.error.message) || "")]))];
         if (k === "aborted" || k === "interrupted") return [h("div", { class: "marker" }, tr("Stopped"))];
         if (k === "max-tokens") return [h("div", { class: "marker bad" }, tr("Stopped at the output limit for one reply"))];
         return [];
@@ -835,12 +844,14 @@ function ChatView(go, sessionId, subInfo) {
     if (topic === "reconnected") follow();
     if (["sessions", "status", "projections", "workspaces", "strata", "catalog"].includes(topic)) renderHeader();
     if (topic === "sessions" || topic === "status") { renderSubBar(); refreshSubLinks(); }
+    if (topic === "strata") renderSeat();
     if (topic === "strata" && live && !live.text) live.count.textContent = thinkingCount(sessionId);
     if (topic === "projections" && (!id || id === sessionId)) renderQueue();
     if (topic === "pending") renderAsks();
-    if (topic === "error" && id === sessionId) log.append(h("div", { class: "marker bad" }, Store.S.errors.get(sessionId)));
+    if (topic === "error" && id === sessionId) log.append(h("div", { class: "marker bad" }, seatCheck(Store.S.errors.get(sessionId))));
   });
   renderHeader();
+  renderSeat();
   document.addEventListener("sync-ctxnum", renderHeader);   // 11/16: the ring's red mark follows dsh's real numbers
   CtxNum.load();
   renderQueue();

@@ -18,9 +18,23 @@ import argparse, ctypes, json, os, random, re, subprocess, sys, time
 IS_WIN = os.name == "nt"
 ENGINE_RAM_GIB_WIN = 2.7      # エンジンの専門家の写し以外の RAM【確認 11/15: 起動前の空き 25.5 → 後 3.3 GiB，写し 19】
 SAFETY_GIB = 2.25             # エンジンが写す前に残す分（STRATA_RESIDENT_HEADROOM_GIB 2＋余白 0.25）【確認 11/15: 9 本の起動で，写し＝写す直前の空き − 2.25．起動前の空きからは約 5 GiB 引いた値】
-DISPLAY_RESERVE_MIB = 1024    # 画面あり【確認: 11/14 の試し．起動後の VRAM の空き 520〜580 MiB】
+DISPLAY_RESERVE_MIB = 768     # 画面あり・VRAM 10 GiB 以上【11/18 静かな測り: Windows 12 GB の Sync-S・XS で 768 が LOW の出ない最小（512 は LOW・止まり，256 は空き 0）．R4 は 1,024 より 3〜4% 速い】
+DISPLAY_RESERVE_SMALL_MIB = 512   # 画面あり・VRAM 10 GiB 未満【11/18 静かな測り: 8 GB の真似の Sync-XS で 512 が LOW の出ない最小（256 は LOW 1 回）．1,024 より decode 13〜15% 速い】
 HEADLESS_RESERVE_MIB = 512
+# 11/17 G: Windows のコミット（メモリ＋ページファイルの上限）で RAM の枠が削られる．エンジンの行 `exceeds available commit (X GiB minus 2 GiB headroom and a 0.25 GiB margin)`
+ENGINE_COMMIT_GIB = 2.0       # エンジンが専門家を写す前に取るコミット【推測: 起動の道具の記録 17.2 とエンジンが見た 15.21 の差．知り合いの PC 1 台】
+COMMIT_HEADROOM_GIB = 2.25    # エンジンが残す分（headroom 2 ＋ 余白 0.25）【確認: 3 回の起動の行で 枠＝コミットの空き − 2.25】
+# 参考【確認】8 GB で予約 1,024 のとき依頼の始まりの空きが 0〜675 MiB，エンジンは 1,536 を勧めたが，本人の方針（性能優先）で予約は増やさない（11/17）
+SLOT_MIB = 1.54               # 専門家の席 1 つの大きさ【推測: 記録 `2.21 GiB free, 1024 reserved, +153 draft -> 706 slots` から】
 VRAM_ENGINE_GIB = 6.1         # 席の外の VRAM（稠密部・MTP・頭・CUDA）【計算: Linux 側の自動設定と同じ値】
+MIN_SLOTS = 461               # エンジンが起動に要る席の最小の数【確認: 知り合いの PC の記録 `needs at least 461 slots`（706 MiB）．pack によって変わるかは未確認】
+RESERVE_FLOOR_MIB = 256       # 起動のやり直しで予約を下げられる下限（sync_launch.loosen と同じ）
+def min_vram_gib():
+    """11/18 W7: この VRAM（GiB）に届かない GPU では，予約を下限まで下げ，GPU が空でも，席が最小の数に届かず起動できない．
+    固定の VRAM ＋ 予約の下限 ＋ 最小の席の大きさ（下書きの分は入れない＝ぎりぎりの PC は止めずに起動を試す）"""
+    return VRAM_ENGINE_GIB + RESERVE_FLOOR_MIB / 1024 + MIN_SLOTS * SLOT_MIB / 1024
+
+
 PACKS = [   # 専門家の大きさ（GiB）．名前は配る名前
     {"id": "sync-m", "name": "Sync-M", "experts_gib": 30.08},
     {"id": "sync-s", "name": "Sync-S", "experts_gib": 24.07},
@@ -62,6 +76,15 @@ $plan = (powercfg /getactivescheme) -join ' '
    cpu = $cpu.Name; cores = $cpu.NumberOfCores; threads = $cpu.NumberOfLogicalProcessors; pagefiles = $pf; dimms = $mem; video = $vc;
    disks = $disks; parts = $parts; procs = $procs; counters = $cnt; hags = $hags; power_plan = $plan } | ConvertTo-Json -Depth 5 -Compress
 """
+
+
+def reserve_for(vram_total_gib, display):
+    """VRAM の予約（MiB）．画面あり VRAM 10 GiB 以上 768・10 GiB 未満 512，画面なし 512．
+    11/17 本人の方針（性能優先．起動できるギリギリ＝LOW にならない最小）で，11/18 の静かな測り（autoconfig-grid-1117・msq-1118）から決めた．
+    画面なしは測っていないので今のまま（512）．8 GB の値は，エンジンの塊の決め方の直しの後に測り直す"""
+    if not display:
+        return HEADLESS_RESERVE_MIB
+    return DISPLAY_RESERVE_MIB if float(vram_total_gib or 0) >= 10.0 else DISPLAY_RESERVE_SMALL_MIB
 
 
 def run_ps(script, timeout=120):
@@ -192,7 +215,8 @@ def preflight(pack_dir=None, do_ssd=True):
     except Exception:
         installed = None
     d["ram"] = {"total_gib": round(ram_total, 2), "installed_gib": installed, "avail_gib": round(avail, 2),
-                "commit_free_gib": round(((c("commit limit") or 0) - (c("committed bytes") or 0)) / G, 1),
+                "commit_free_gib": round(((c("commit limit") or 0) - (c("committed bytes") or 0)) / G, 1) if c("commit limit") else None,   # 11/17: Linux は None
+                "commit_limit_gib": round(c("commit limit") / G, 1) if c("commit limit") else None,
                 "dimms": p.get("dimms"), "page_reads_per_s": round(c("page reads/sec") or 0), "disk_read_mb_s": round((c("disk read bytes/sec") or 0) / 1e6, 1)}
     disk_of = {x["letter"].upper(): x["disk"] for x in p.get("parts") or []}
     disks = {x["id"]: x for x in p.get("disks") or []}
@@ -218,6 +242,9 @@ def preflight(pack_dir=None, do_ssd=True):
         if kind or priv >= 0.3:
             apps.append({"name": x.get("name"), "n": x.get("n"), "private_gib": round(priv, 2), "kind": kind, "label": label})
     d["apps"] = apps
+    # 11/17 G: コミットの多いアプリ（PrivateMemorySize64＝コミットした量．RAM の多い順ではない）．閉じればコミットが戻る
+    d["commit_top"] = [{"name": a["name"], "label": a["label"], "private_gib": a["private_gib"]} for a in sorted((x for x in apps if (x["name"] or "").lower() != "strata"), key=lambda a: -a["private_gib"])[:5]] if IS_WIN else []
+    d["pagefile_total_gib"] = round(sum(x["alloc_gib"] for x in d["pagefiles"]), 1) if IS_WIN else None
     # Strata が動いているときは，その分を空きに足して考える（止めてから調べるのが確か）
     eng = [x for x in p.get("procs") or [] if (x.get("name") or "").lower() == "strata"]
     d["strata_running"] = bool(eng)
@@ -232,7 +259,7 @@ def preflight(pack_dir=None, do_ssd=True):
         d["ssd"] = ssd_probe(pack_dir)
     g0 = gp[0] if gp else {}
     display = (g0.get("display_active") or "").lower().startswith("enabled")
-    reserve = DISPLAY_RESERVE_MIB if display else HEADLESS_RESERVE_MIB
+    reserve = reserve_for((g0.get("vram_total_mib") or 0) / 1024, display)    # 11/17 G: 8 GB で画面ありは 1,536
     vram_free = (g0.get("vram_free_mib") or 0) / 1024
     if eng and gp:      # 動いている Strata の VRAM は分けて見えない（WDDM）: 全体から画面の分（推測 0.9 GiB）を引いた値で考える
         vram_free = (g0.get("vram_total_mib") or 0) / 1024 - (0.9 if display else 0.1)
@@ -243,6 +270,9 @@ def preflight(pack_dir=None, do_ssd=True):
     for avail_case, label in ((avail, "今のまま"), (avail + d["closable_gib"], "上のアプリを閉じたら")):
         for pk in PACKS:
             budget = max(0.0, min(pk["experts_gib"] - seats_gib, avail_case - ENGINE_RAM_GIB_WIN - SAFETY_GIB))
+            cf = d["ram"].get("commit_free_gib")
+            if IS_WIN and cf is not None:      # 11/17 G: コミットの枠（閉じる場合は，閉じたアプリのコミットも戻る）
+                budget = min(budget, max(0.0, cf + (d["closable_gib"] if avail_case != avail else 0) - ENGINE_COMMIT_GIB - COMMIT_HEADROOM_GIB))
             budget = int(budget * 4) / 4.0
             on_file = max(0.0, pk["experts_gib"] - seats_gib - budget)
             recs.append({"case": label, "pack": pk["name"], "resident_budget_gib": budget, "vram_reserve_mib": reserve,
@@ -276,12 +306,15 @@ def preflight(pack_dir=None, do_ssd=True):
     if d.get("pagefile_on_model_disk"):
         adv.append("ページファイルがモデルと同じ SSD にある: RAM が足りなくなると，モデルの読みとページの読み書きが同じ SSD を取り合う．"
                    "RAM の枠は「起動後に 1 GiB 残る」より大きくしない．")
+    md = d.get("model_drive") or {}
+    if (md.get("media") or "").upper() == "HDD" and any(r["on_file_gib"] > 0 for r in recs if r["case"] == "今のまま"):   # 11/18 W7
+        adv.append("モデルの置き場が HDD: 専門家が SSD（HDD）から読まれるので遅くなる．SSD に置くと速い．")
     if d["ram"]["page_reads_per_s"] > 300:
         adv.append(f"いまページの読み込みが毎秒 {d['ram']['page_reads_per_s']} 回ある（静かなときは 10 回前後）: 落ち着くまで待ってから起動・測定する．")
     if display and d["igpu_present"]:
         adv.append("内蔵 GPU がある: モニターをマザーボード側の端子につなぐと，VRAM が約 0.5〜1 GiB 空き，描画が decode と取り合わなくなる．")
     elif display:
-        adv.append("画面をこの GPU が映している（内蔵 GPU は見つからない／無効）: VRAM の予約は 1,024 MiB．ブラウザーの描画は decode と同じ GPU を使う．")
+        adv.append(f"画面をこの GPU が映している（内蔵 GPU は見つからない／無効）: VRAM の予約は {reserve_for(float(g0.get('vram_total_mib') or 0) / 1024 if g0 else 0, True):,} MiB．ブラウザーの描画は decode と同じ GPU を使う．")
     if g0 and g0.get("pcie_width") and g0["pcie_width"] < 16:
         adv.append(f"PCIe の幅が x{g0['pcie_width']:.0f}: RAM の専門家を GPU が読む道（PCIe）が細い → CPU に多く回す（自動の分担に任せる）．")
     s = d.get("ssd") or {}

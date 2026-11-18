@@ -1,5 +1,3 @@
-<!-- Translated from REMOTE.ja.md (the Japanese file is the source), 11/16 S2. -->
-
 # Using it from a phone
 
 From a phone's browser you can use the chat page of the Sync-Strata running on your PC. Nothing needs to be installed on the phone.

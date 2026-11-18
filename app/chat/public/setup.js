@@ -1,8 +1,8 @@
 // 11/15 app1115: the start settings, the first-run guide and "stop" choices, for a relay the launcher (sync.py) started.
 // - The settings sheet: the model, quality or speed, the RAM limit and the VRAM kept free, each "automatic" by default. They are
 //   the launcher's settings.json (GET/POST /m/settings) and take effect at the next start.
-// - The first-run guide opens by itself when /m/models says first_run (no model, or a shared part missing): what to download,
-//   how big, the free space, and the buttons. It downloads one item after another ("Download all").
+// - The first-run guide opens by itself when /m/models says first_run (no model, or a shared part missing): the model to download,
+//   how big (the shared parts it needs included), the free space, and the button (11/17: the relay's download list does the rest).
 // - "Stop": Strata only, or everything (this page then loses its connection too).
 // strata.js (loaded before) gives Models, loadModels, modelsPost, fmtGiB, fmtSpeed, fmtLeft, startStrata, stopStrata.
 "use strict";
@@ -69,6 +69,7 @@ const Setup = (() => {
         choice(tr("Memory push-out"), "ram_squeeze", [["auto", tr("Push out")], ["off", tr("Leave alone")]],
           tr("When starting or switching models, other apps' memory is pushed out and given to the model. No apps are closed.")));
       if (typeof CtxSettings !== "undefined") body.append(...CtxSettings.extras());   // 11/15 係 C
+      if (typeof UpdateView !== "undefined") body.append(...UpdateView.extras());     // 11/18 係 W9: 更新
     }
     async function save(change) {
       try {
@@ -107,6 +108,9 @@ const Setup = (() => {
   }
 
   // --- the first-run guide ---
+  // 11/17 W1 (D, E): one model (the recommended one) and one button. Pressing it puts the model on the download list together with
+  // the shared parts it lacks (those come first); the relay fetches them one after another. Closing the guide changes nothing: the
+  // downloads go on, and the Strata sheet's model list shows them and can add more. There is no screen of shared parts alone.
   let guideOpen = false;
   function openGuide() {
     if (guideOpen) return;
@@ -115,55 +119,41 @@ const Setup = (() => {
     const free = h("div", { class: "sheet-note muted" });
     const title = h("div", { class: "sheet-title" }, tr("Download a model"));
     const intro = h("div", { class: "sheet-note muted" }, tr("Once the download finishes, Strata can start."));
-    const all = h("button", { class: "btn wide-in primary", type: "button" }, tr("Download all"));
+    const all = h("button", { class: "btn wide-in primary", type: "button" }, tr("Getting ready…"));
     const later = h("button", { class: "btn wide-in ghost", type: "button" }, tr("Later"));
-    // 11/15 係 C: the Hugging Face token field (after saving, the download that failed for a private model starts again)
-    const hfBox = typeof HfToken !== "undefined" ? HfToken.box(() => { const x = items().find((i) => i.download && i.download.error_kind === "auth"); if (x) act(() => modelsPost("download", x.id)); }) : null;
-    let auto = false;
     let closed = false;
     let timer = null;
 
-    // what is missing: the recommended model (or the one being downloaded), then the shared parts
-    function items() {
+    // the model to show: the one on the download list, the one being checked, the recommended one when none is here yet, or a model
+    // that is here but lacks a shared part it needs to start
+    function pickModel() {
       const L = Models.list;
-      if (!L) return [];
-      const out = [];
+      if (!L) return null;
       const ms = (L.models || []).filter((m) => !m.pending);   // 11/15: 準備中のモデルは案内に出さない
       const haveModel = ms.some((m) => m.local.complete);
       const rec = ms.find((m) => m.recommended) || ms[0];
-      const busy = ms.find((m) => m.download && DL_ACTIVE.includes(m.download.state));
-      const m = busy || (!haveModel ? rec : null);
-      if (m && !m.local.complete) out.push({ ...m, kind: "model", downloadable: true });
-      for (const x of L.shared || []) if (!x.local.complete) out.push({ ...x, kind: "shared" });
-      return out;
+      return ms.find((m) => queueOf(m.id)) || ms.find(dlActive) || (!haveModel ? rec : ms.find((m) => m.local.complete && m.shared_missing && m.shared_missing.length)) || null;
     }
-    function row(x) {
-      const d = x.download;
-      const active = d && DL_ACTIVE.includes(d.state);
-      const left = x.local.total_bytes - x.local.have_bytes;
-      const lines = [h("div", { class: "msel-note" }, x.kind === "model"
-        ? tr("Model · {0} to download", [fmtGiB(left)]) + (x.recommended ? tr(" · recommended for this PC") : "")
-        : (x.optional ? tr("Shared part (optional) · {0}", [fmtGiB(left)]) : tr("Shared part · {0}", [fmtGiB(left)])))];
+    function row(m) {
+      const d = m.download;
+      const q = queueOf(m.id);
+      const left = m.local.total_bytes - m.local.have_bytes;
+      const lines = [h("div", { class: "msel-note" }, tr("Model · {0} to download", [fmtGiB(left)]) + (m.recommended ? tr(" · recommended for this PC") : ""))];
       const acts = [];
-      if (active) {
-        const pct = d.state === "verifying" && d.verify && d.verify.total_bytes ? Math.floor((100 * d.verify.done_bytes) / d.verify.total_bytes)
-          : d.total_bytes ? Math.floor((100 * (d.done_bytes || 0)) / d.total_bytes) : 0;
+      if (dlActive(m)) {
+        const [pct, text] = progressText(d);
         const fill = h("div", { class: "ctx-fill" });
         fill.style.width = `${pct}%`;
-        lines.push(h("div", { class: "ctx-bar dl-bar" }, fill),
-          h("div", { class: "msel-note dl-text" }, d.state === "verifying" ? tr("Checking the files {0}%", [pct])
-            : [`${pct}%`, fmtSpeed(d.speed_bps), fmtLeft(d.eta_s)].filter(Boolean).join(" · ")));
-        acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: () => act(() => { auto = false; return modelsPost("cancel", x.id); }) }, tr("Stop the download")));
-      } else if (!x.downloadable) {
-        lines.push(h("div", { class: "msel-note fit-warn" }, tr("The download source is not set.")));
-      } else {
-        if (d && d.state === "failed" && d.error) lines.push(h("div", { class: "msel-note fit-warn" }, d.error));
-        const resume = x.local.have_bytes + x.local.partial_bytes > 0;
-        acts.push(h("button", { class: "btn slim primary", type: "button", disabled: !!(Models.list && Models.list.active),
-          onclick: () => act(() => modelsPost("download", x.id)) }, resume ? tr("Resume the download") : tr("Download ({0})", [fmtGiB(left)])));
+        lines.push(h("div", { class: "ctx-bar dl-bar" }, fill), h("div", { class: "msel-note dl-text" }, text));
+        acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: () => act(() => modelsPost("cancel", m.id)) }, tr("Stop the download")));
+      } else if (q) {
+        lines.push(h("div", { class: "msel-note" }, tr("Waiting to download")));
+        acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: () => act(() => modelsPost("cancel", m.id)) }, tr("Take off the list")));
+      } else if (d && d.state === "failed" && d.error) {
+        lines.push(h("div", { class: "msel-note fit-warn" }, dlFailText(d)));
       }
       return h("div", { class: "msel-item strata-model" }, h("div", { class: "msel-text" },
-        h("div", { class: "msel-name" }, x.name), lines, acts.length ? h("div", { class: "model-acts" }, acts) : null));
+        h("div", { class: "msel-name" }, m.name), lines, acts.length ? h("div", { class: "model-acts" }, acts) : null));
     }
     async function act(fn) {
       try { await fn(); } catch (e) { toast(e.message); }
@@ -173,8 +163,12 @@ const Setup = (() => {
     function render() {
       const L = Models.list;
       if (!L) return;
-      const xs = items();
-      if (!L.first_run && !xs.some((x) => !x.optional)) {
+      const m = pickModel();
+      const queued = (L.queue || []).length > 0;
+      // what is still to fetch for this model (its own files, and the shared parts that are not on the list yet)
+      const need = m ? (m.local.complete ? 0 : m.local.total_bytes - m.local.have_bytes) + (m.shared_bytes || 0) : 0;
+      const lacks = !!m && (!m.local.complete || (m.shared_pending && m.shared_pending.length > 0));
+      if (!L.first_run && !lacks && !queued) {
         // ready: offer the start
         title.textContent = tr("Ready");
         intro.textContent = tr("Strata can start now.");
@@ -184,38 +178,32 @@ const Setup = (() => {
         all.disabled = !!(Store.S.strata && Store.S.strata.online);
         if (typeof EnvCheck !== "undefined") EnvCheck.guide(list, all);   // 11/15 係 C env: not supported -> no start
         all.onclick = () => {
-          const m = (L.models || []).find((x) => x.recommended && x.local.complete) || (L.models || []).find((x) => x.local.complete);
-          const r = (Spec.v && Spec.v.recommended_r) || m.default_r || 7;   // 11/15: この PC に推奨の R（R4 か R7）
-          if (m) startStrata(m.preset, { model: m.id, r, name: `${m.name} ${rLabel(r)}` }).catch((e) => toast(e.message));
+          const m2 = (L.models || []).find((x) => x.recommended && x.local.complete) || (L.models || []).find((x) => x.local.complete);
+          const r = (Spec.v && Spec.v.recommended_r) || (m2 && m2.default_r) || 7;   // 11/15: この PC に推奨の R（R4 か R7）
+          if (m2) startStrata(m2.preset, { model: m2.id, r, name: `${m2.name} ${rLabel(r)}` }).catch((e) => toast(e.message));
           sh.close();
         };
         return;
       }
-      list.replaceChildren(...xs.map(row));
-      if (hfBox) { list.append(hfBox.el); hfBox.need(xs.some((x) => x.download && x.download.state === "failed" && x.download.error_kind === "auth")); }   // 11/15 係 C
-      const need = xs.filter((x) => x.downloadable).reduce((a, x) => a + (x.local.total_bytes - x.local.have_bytes), 0);
-      const fb = (xs[0] && xs[0].free_bytes) ?? L.free_bytes;
+      title.textContent = tr("Download a model");
+      intro.textContent = tr("Once the download finishes, Strata can start.");
+      const shared = sharedRow(L, () => act(() => stopSharedParts()));
+      list.replaceChildren(...(m ? [row(m)] : []), ...(shared ? [shared] : []));
+      const fb = (m && m.free_bytes) ?? L.free_bytes;
       free.textContent = fb != null ? tr("Free space: {0} (to download: {1})", [fmtGiB(fb), fmtGiB(need)]) : tr("To download: {0}", [fmtGiB(need)]);
       free.classList.toggle("fit-warn", fb != null && fb < need + 2 * GIB);
-      all.textContent = auto ? tr("Downloading one after another…") : tr("Download all");
-      all.disabled = auto || !xs.some((x) => x.downloadable);
-      all.onclick = () => { auto = true; next(); render(); };
+      const resume = !!m && m.local.have_bytes + m.local.partial_bytes > 0 && !m.local.complete;
+      all.textContent = queued ? tr("Downloading…") : resume ? tr("Resume the download") : tr("Download ({0})", [fmtGiB(need)]);
+      all.disabled = queued || !m;
+      all.onclick = () => act(() => modelsPost("download", m.id));
       if (typeof EnvCheck !== "undefined") EnvCheck.guide(list, all);   // 11/15 係 C env: not supported -> no download
-    }
-    async function next() {
-      const L = Models.list;
-      if (!auto || !L || L.active) return;
-      const x = items().find((i) => i.downloadable && !(i.download && i.download.state === "failed"));
-      if (!x) { auto = false; return; }
-      try { await modelsPost("download", x.id); } catch (e) { toast(e.message); auto = false; }
     }
     async function poll() {
       if (!Spec.v) await Spec.load();   // 11/15: 「Strata を起動」は，この PC に推奨の R で
       await loadModels();
       if (closed) return;
-      await next();
       render();
-      timer = setTimeout(poll, Models.list && Models.list.active ? 1000 : 3000);
+      timer = setTimeout(poll, Models.list && (Models.list.active || (Models.list.queue || []).length) ? 1000 : 3000);
     }
     later.onclick = () => sh.close();
     const sh = openSheet([title, intro, list, free, all, later], {

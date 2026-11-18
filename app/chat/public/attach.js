@@ -1,5 +1,5 @@
 // 10/30 本人「スマホ版の UI で，＋ボタンで画像（と対応しているならファイルも）を送れるように」．
-// 画像は dsh の送信の部品 {type:"image", mediaType, data(base64), name} で送る（png・jpeg・webp・gif．大きい写真は長い辺 2,048 px の
+// 画像は dsh の送信の部品 {type:"image", mediaType, data(base64), name} で送る（png・jpeg・webp・gif．大きい写真は長い辺 768 px（11/17 から．前は 2,048）の
 // JPEG に縮める）．ファイルは POST /api/session/uploadFileBinary?sessionId=…&name=…（中身そのまま）で dsh に預け，返ってきた控えを
 // {type:"file", receiptId} で送る（dsh-client-file-upload と同じ道）．
 // 画像を読めるのは dsh の設定の「画像あり」のモデル（strata-vision）だけで，ほかのモデルに送ると dsh が断る
@@ -9,7 +9,10 @@
 
 const Attach = (() => {
   const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-  const MAX_SIDE = 2048;
+  // 11/17 本人「解像度を 750 くらいに落として，画像の読み取り（エンコーダ）を速く」: 長い辺 768 px に縮める．
+  // 768 は画像の読み取りの元の大きさ（mmproj の clip.vision.image_size．16 px の区切り × 2×2 で 32 px が 1 トークン）．
+  // エンジン側の上限（起動の設定の vision.max_tokens）も 768×768＝576 トークンに合わせる
+  const MAX_SIDE = 768;
   const MAX_BYTES = 3 * 1024 * 1024;
 
   const isImage = (file) => /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|gif|heic|heif|bmp)$/i.test(file.name || "");

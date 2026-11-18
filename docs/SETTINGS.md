@@ -1,5 +1,3 @@
-<!-- Draft (11/16, D2). Translated from SETTINGS.ja.md (the Japanese file is the source). [TBD] marks go before release. -->
-
 # Settings
 
 All settings live in one file (`settings.json`), and the app (PC and phone) and the CLI read the same one. Every item defaults to `auto` (the app checks your PC and decides). They apply from the next start.
@@ -31,7 +29,6 @@ With `auto`, they follow your VRAM like this (if only one is `auto`, it matches 
 | 12 GB or more | 256K | k8v4 |
 | 10-11 GB | 128K | k8v4 |
 | 8-9 GB | 64K | k4 |
-| 6 GB | [measuring] | [measuring] |
 
 A combination that does not fit in VRAM cannot be chosen in the app or the CLI (the CLI refuses and gives the reason). If a chat grows past this length and VRAM runs out, it slows down, then stops, and the engine is restarted.
 
@@ -47,7 +44,7 @@ You need it only to download models from a private repository (a read-only token
 |---|---|---|
 | `api_port`, `api_host` | `8080`, `127.0.0.1` | Where the API listens. Anything other than `127.0.0.1` needs a key ([API.md](API.md)) |
 | `lan_remote` | `off` | Phone connection (`off`, `lan`, `tailscale`). It can be changed only from the PC's screen and the CLI, and takes effect when dsh is restarted ([REMOTE.md](REMOTE.md)) |
-| `dsh_port`, `relay_port`, `proxy_port` | `3080`, `3081`, `8081` | Ports of dsh and the relay. Change them only if they clash with other apps |
+| `dsh_port`, `relay_port`, `proxy_port` | `3080`, `3081`, `8081` | Ports of dsh and the relay. If another program already uses a port (`api_port` included), `sync up` picks a free one nearby, saves it here and tells you; it keeps using that port from then on. You can also set them by hand |
 
 ## Chat saves
 
@@ -71,4 +68,3 @@ To avoid competing with the engine for CPU and GPU, the chat screen (the app she
 
 - While it runs, close apps that use a lot of GPU or memory (games, video export, heavy browser pages). `sync doctor` shows which apps are in use and what it recommends.
 - Put the models on an NVMe SSD.
-- [TBD: Windows settings to recommend (page file, power plan and so on), only those that have been measured]

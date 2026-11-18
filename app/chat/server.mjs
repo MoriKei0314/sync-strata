@@ -250,7 +250,24 @@ function recordRequests(list) {
   if (lines) fs.appendFile(REQ_LOG, lines, () => {});
 }
 
+// 11/17 係 W6: the engine's GET /v1/status says "restart_note": "seat_short" when it died in a chat and could not start again with
+// enough GPU memory (or only started slow). The page then suggests a lighter model. Read every 5 s (and whenever /metrics fails,
+// as the server can answer while the engine is down); null = nothing to say, or an older engine without the field.
+let restartNote = null;
+let noteAt = 0;
+async function pollRestartNote() {
+  if (Date.now() - noteAt < 5000) return;
+  noteAt = Date.now();
+  try {
+    const r = await fetch(`${STRATA}/v1/status`, { signal: AbortSignal.timeout(2000) });
+    if (!r.ok) { restartNote = null; return; }
+    const j = await r.json();
+    restartNote = typeof j.restart_note === "string" ? j.restart_note : null;
+  } catch { restartNote = null; }
+}
+
 async function pollStrata() {
+  pollRestartNote();
   try {
     const all = !wasOnline; // just came up (or this server just started): take every request it still keeps
     const r = await fetch(`${STRATA}/metrics${all ? "?requests=all" : ""}`, { signal: AbortSignal.timeout(2500) });
@@ -279,7 +296,7 @@ async function strataLoop() {
 
 function strataStatus(res) {
   lastAsked = Date.now();
-  sendJson(res, { ...snapshot, job: jobView() });
+  sendJson(res, { ...snapshot, restart_note: restartNote, job: jobView() });
 }
 
 // ?from=&to= (ms): the rows that ended in that window, at most 3000.
@@ -311,21 +328,78 @@ function jobView() {
 // PowerShell itself writes every line the script prints (all streams) to the log, as UTF-8.
 // 11/15: steps = [[script, extra], ...] run one after another in the same PowerShell, stopping at the first that fails
 // (switching models = stop, then start). A single script with its extra still works as before.
+// 11/17 W1 (I-7): on Windows the steps still run in one PowerShell as before. Elsewhere (Linux) there is no PowerShell: each
+// step is the launcher's Python started directly, one after another, stopping at the first that fails. A step is
+// [script, extra] (a .ps1 and its argument text, Windows only) or {exe, args: [..]} (a program and its arguments).
+// job-cmd-begin
+const IS_WIN = process.platform === "win32";
+const step = (exe, args) => ({ exe, args });
+const launcherArgs = (...a) => ["-X", "utf8", LAUNCHER, ...a];
+// start (up, after a down of the running engine when restart) and stop through the launcher: the command lines
+function startSteps(restart, m, r) {
+  const up = launcherArgs("up", "--gui", ...(m ? ["--model", m.id] : []), ...(r ? ["--tail-skip", String(r)] : []));
+  return restart ? [step(SYNC_PY, launcherArgs("down", "--engine")), step(SYNC_PY, up)] : [step(SYNC_PY, up)];
+}
+const stopSteps = () => [step(SYNC_PY, launcherArgs("down", "--engine"))];
+// PowerShell text of an argument: the launcher's path always quoted, plain words as they are, the rest quoted
+const psArg = (a) => (a === LAUNCHER || !/^[A-Za-z0-9_.\-]+$/.test(String(a)) ? psQuote(a) : String(a));
+function jobPlan(steps, log, platform, powershell) {
+  if (platform === "win32") {
+    const add = `*>&1 | ForEach-Object { Add-Content -LiteralPath '${log}' -Encoding UTF8 -Value ('' + $_) }`;
+    const body = steps.map((s) => (Array.isArray(s)
+      ? `& '${s[0]}' ${s[1] || ""} ${add}; if ($LASTEXITCODE) { exit $LASTEXITCODE }`
+      : `& '${s.exe}' ${s.args.map(psArg).join(" ")} ${add}; if ($LASTEXITCODE) { exit $LASTEXITCODE }`)).join("; ");
+    // 11/15 app1115: read what programs print as UTF-8 (the launcher prints Japanese; the console's code page would garble it)
+    return { via: "powershell", file: powershell, args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+      `[Console]::OutputEncoding = [Text.Encoding]::UTF8; ${body}; exit 0`] };
+  }
+  if (steps.some((s) => Array.isArray(s))) throw new Error("この PC では PowerShell の手順は使えません");
+  return { via: "direct", steps: steps.map((s) => ({ file: s.exe, args: s.args })) };
+}
+// job-cmd-end
 function runJob(kind, script, extra = "", mode = null, more = {}) {
   const log = path.join(STATE_DIR, `strata-${kind}.log`);
   fs.writeFileSync(log, "");
   const steps = Array.isArray(script) ? script : [[script, extra]];
-  const add = `*>&1 | ForEach-Object { Add-Content -LiteralPath '${log}' -Encoding UTF8 -Value ('' + $_) }`;
-  const body = steps.map(([s, x]) => `& '${s}' ${x || ""} ${add}; if ($LASTEXITCODE) { exit $LASTEXITCODE }`).join("; ");
-  // 11/15 app1115: read what programs print as UTF-8 (the launcher prints Japanese; the console's code page would garble it)
-  const child = spawn(POWERSHELL, ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-    `[Console]::OutputEncoding = [Text.Encoding]::UTF8; ${body}; exit 0`],
-  { stdio: "ignore", windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
   const j = { kind, startedAt: Date.now(), log, mode, ...more };
+  const env = { ...process.env, PYTHONIOENCODING: "utf-8" };
+  let plan;
+  try { plan = jobPlan(steps, log, process.platform, POWERSHELL); } catch (e) {
+    j.endedAt = Date.now(); j.code = -1; fs.appendFileSync(log, `${e.message}
+`); job = j; return;
+  }
   job = j;
-  child.on("exit", (code) => { j.endedAt = Date.now(); j.code = code; });
-  child.on("error", (e) => { j.endedAt = Date.now(); j.code = -1; fs.appendFile(log, `${e.message}\n`, () => {}); });
-  child.unref();
+  const fail = (e) => { j.endedAt = Date.now(); j.code = -1; fs.appendFile(log, `${e.message}
+`, () => {}); };
+  if (plan.via === "powershell") {
+    const child = spawn(plan.file, plan.args, { stdio: "ignore", windowsHide: true, env });
+    child.on("exit", (code) => { j.endedAt = Date.now(); j.code = code; });
+    child.on("error", fail);
+    child.unref();
+    return;
+  }
+  // Linux: the programs write to the log themselves (stdout and stderr to the same file). Detached, so a Strata start does not
+  // end with this relay.
+  let fd;
+  try { fd = fs.openSync(log, "a"); } catch (e) { fail(e); return; }
+  let i = 0;
+  let over = false;
+  const finish = (code, err) => {
+    if (over) return;
+    over = true;
+    try { fs.closeSync(fd); } catch { /* closed */ }
+    if (err) fail(err); else { j.endedAt = Date.now(); j.code = code; }
+  };
+  const next = () => {
+    if (i >= plan.steps.length) return finish(0);
+    const s = plan.steps[i++];
+    let child;
+    try { child = spawn(s.file, s.args, { stdio: ["ignore", fd, fd], detached: true, env }); } catch (e) { return finish(-1, e); }
+    child.on("error", (e) => finish(-1, e));
+    child.on("exit", (code) => { if (code) finish(code); else next(); });
+    child.unref();
+  };
+  next();
 }
 
 // What could make starting Strata a bad idea right now: Unity running (Strata takes ~23 GiB of RAM at start and
@@ -413,10 +487,8 @@ async function strataControl(req, res, action) {
       }
       const miss = sharedState(readCatalog()).filter((x) => !x.optional && !x.local.complete).map((x) => x.name);
       if (miss.length) return sendJson(res, { ok: false, error: `起動に要る共通の部品がありません: ${miss.join(", ")}` });
-      const up = `-X utf8 ${psQuote(LAUNCHER)} up --gui${m ? ` --model ${m.id}` : ""}${r ? ` --tail-skip ${r}` : ""}`;
-      const steps = snapshot.online ? [[SYNC_PY, `-X utf8 ${psQuote(LAUNCHER)} down --engine`], [SYNC_PY, up]] : [[SYNC_PY, up]];
       const mode = m ? m.preset || m.id : legacy;
-      runJob("start", steps, "", mode, { model: m ? m.id : null, r, restart: snapshot.online });
+      runJob("start", startSteps(snapshot.online, m, r), "", mode, { model: m ? m.id : null, r, restart: snapshot.online });
       return sendJson(res, { ok: true, mode, model: m ? m.id : null, r, restart: snapshot.online, via: "launcher" });
     }
     let cfg = STRATA_CONFIGS[legacy];
@@ -438,7 +510,7 @@ async function strataControl(req, res, action) {
     runJob("start", steps, "", mode, { model: m ? m.id : null, r, restart: snapshot.online });
     return sendJson(res, { ok: true, mode, model: m ? m.id : null, r, restart: snapshot.online });
   }
-  if (LAUNCHER) runJob("stop", [[SYNC_PY, `-X utf8 ${psQuote(LAUNCHER)} down --engine`]]);
+  if (LAUNCHER) runJob("stop", stopSteps());
   else runJob("stop", STRATA_STOP);
   return sendJson(res, { ok: true });
 }
@@ -486,7 +558,7 @@ async function shutdownRoute(req, res, url) {
   const what = url.searchParams.get("what") === "all" ? "all" : "engine";
   if (what === "engine") {
     if (job && !job.endedAt) return sendJson(res, { ok: false, error: "起動か終了の途中です" });
-    runJob("stop", [[SYNC_PY, `-X utf8 ${psQuote(LAUNCHER)} down --engine`]]);
+    runJob("stop", stopSteps());
     return sendJson(res, { ok: true, what });
   }
   // everything, this relay included: answer first, then start the launcher on its own (it outlives this process)
@@ -505,7 +577,14 @@ async function shutdownRoute(req, res, url) {
 // between chunks, and after 8 s, if it is still there, the process this server started (by its own handle, no other).
 const GIB = 1024 ** 3;
 const DL_ACTIVE = new Set(["starting", "downloading", "verifying"]);
-const downloads = new Map(); // id -> {child, stopFile, stopAsked}
+const downloads = new Map(); // id -> {child, stopFile, stopAsked, verifyOnly}
+// 11/17 W1 (D): downloading a model also downloads the shared parts it needs first. true = the parts marked "optional" in
+// models.json too (本人の決定 11/17); false = only the parts that are not optional. This is the one line that switches it.
+const AUTO_DOWNLOAD_OPTIONAL = true;
+// 11/17 W1 (E): the waiting list of downloads (ids, the one running first), kept so that it goes on after the app is closed and
+// opened again. Another download may be added while one runs; they run one after another.
+const QUEUE_FILE = path.join(MODELS_STATE, "queue.json");
+const DISK_MARGIN = 2 * 1024 ** 3;   // kept free beyond what the list still has to fetch
 fs.mkdirSync(MODELS_STATE, { recursive: true });
 
 const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
@@ -678,7 +757,7 @@ async function startDownload(id, verifyOnly) {
   // The Hugging Face key is never handled here: huggingface_hub in that process reads the PC's own login.
   const child = spawn(py, args, { stdio: ["ignore", out, out], windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
   fs.closeSync(out);
-  const d = { child, stopFile, stopAsked: false };
+  const d = { child, stopFile, stopAsked: false, verifyOnly: !!verifyOnly };
   downloads.set(id, d);
   child.on("error", (e) => { fs.writeFileSync(status, JSON.stringify({ id, state: "failed", error: e.message, updated_at: Date.now() / 1000 })); });
   child.on("exit", (code) => {
@@ -688,14 +767,94 @@ async function startDownload(id, verifyOnly) {
         error: d.stopAsked ? null : `ダウンロードの道具が途中で終わりました（終了コード ${code}）`, updated_at: Date.now() / 1000 }));
     }
     if (downloads.get(id) === d) downloads.delete(id);
+    if (!d.verifyOnly) queueWrite(queueRead().filter((x) => x !== id));   // 11/17 W1: done, failed or stopped: it leaves the list
+    setTimeout(() => queueTick().catch(() => {}), 300);                  // and the next one starts
   });
   return { ok: true };
+}
+
+// --- 11/17 W1 (D, E): the waiting list ---
+function queueRead() {
+  const q = readJson(QUEUE_FILE);
+  return Array.isArray(q && q.items) ? q.items.filter((x) => typeof x === "string") : [];
+}
+function queueWrite(items) {
+  try { fs.writeFileSync(QUEUE_FILE, JSON.stringify({ items, at: Date.now() })); } catch { /* not kept */ }
+}
+const itemLeft = (m) => { const l = localState(m); return Math.max(0, l.total_bytes - l.have_bytes - l.partial_bytes); };
+const rootOf = (dir) => path.parse(path.resolve(String(dir || "."))).root.toLowerCase();
+// the shared parts a model's download brings along: not here yet, with a place to fetch from (the optional ones per AUTO_DOWNLOAD_OPTIONAL)
+function sharedWanted(cat) {
+  return (cat.shared || []).filter((s) => s.hf && s.hf.repo && (AUTO_DOWNLOAD_OPTIONAL || !s.optional) && !localState(s).complete);
+}
+// Whether the whole list fits the disks (per drive: what every item still has to fetch, plus the margin, against the free space).
+function queueDiskError(cat, ids) {
+  const need = new Map();
+  const free = new Map();
+  for (const id of ids) {
+    const m = itemById(cat, id);
+    if (!m) continue;
+    const root = rootOf(m.local_dir);
+    need.set(root, (need.get(root) || 0) + itemLeft(m));
+    if (!free.has(root)) free.set(root, freeBytes(m.local_dir));
+  }
+  const g = (b) => `${(b / GIB).toFixed(1)} GiB`;
+  for (const [root, n] of need) {
+    const fr = free.get(root);
+    if (n > 0 && fr != null && fr < n + DISK_MARGIN) return `空きが足りません（ダウンロード待ちの分 ${g(n)} に対して，空きは ${g(fr)}）`;
+  }
+  return null;
+}
+
+// POST /m/models/download?id=: puts the item on the list. A model brings the shared parts it lacks, ahead of everything that
+// waits (behind the one running); a model that is already here only brings the parts.
+function enqueueDownload(id) {
+  const cat = readCatalog();
+  const m = itemById(cat, id);
+  if (!m) return { ok: false, error: "一覧にないモデルです" };
+  if (!(m.hf && m.hf.repo)) return { ok: false, error: `${m.name} の置き場（Hugging Face）がまだ決まっていません` };
+  const isModel = (cat.models || []).some((x) => x.id === id);
+  const q = queueRead().filter((x) => itemById(cat, x));
+  const act = activeDownload(cat);
+  const deps = isModel ? sharedWanted(cat).map((s) => s.id) : [];
+  const own = isModel && localState(m).complete ? [] : [id];
+  if (!deps.length && !own.length) return { ok: false, error: `${m.name} はもう手元にあります` };
+  const head = act && q.includes(act) ? [act] : [];
+  const order = [...new Set([...head, ...deps, ...q.filter((x) => !deps.includes(x)), ...own])];
+  if (order.length === q.length && order.every((x, i) => x === q[i])) return { ok: true, already: true, queued: q };
+  const why = queueDiskError(cat, order);
+  if (why) return { ok: false, error: why };
+  queueWrite(order);
+  queueTick().catch(() => {});
+  return { ok: true, queued: order };
+}
+
+// Starts the head of the list when nothing is running. One that cannot start is dropped and the next one is tried.
+let ticking = false;
+async function queueTick() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    for (let guard = 0; guard < 50; guard++) {
+      const cat = readCatalog();
+      const q = queueRead().filter((x) => itemById(cat, x));
+      // a download's own process counts as running until it has really ended (its status file can say "done" a moment before)
+      const running = [...downloads.values()].some((d) => d.child.exitCode == null && d.child.signalCode == null);
+      if (running || activeDownload(cat) || !q.length) { if (q.length !== queueRead().length) queueWrite(q); break; }
+      const r = await startDownload(q[0], false);
+      if (r.ok) break;
+      queueWrite(q.slice(1));
+    }
+  } finally { ticking = false; }
 }
 
 function cancelDownload(id) {
   if (!itemById(readCatalog(), id)) return { ok: false, error: "一覧にないモデルです" };
   const s = dlStatus(id);
-  if (!s || !DL_ACTIVE.has(s.state)) return { ok: false, error: "進んでいるダウンロードはありません" };
+  const q = queueRead();
+  const waiting = q.includes(id);
+  if (waiting) queueWrite(q.filter((x) => x !== id));   // 11/17 W1: taken off the list (the running one too: it does not start again)
+  if (!s || !DL_ACTIVE.has(s.state)) return waiting ? { ok: true } : { ok: false, error: "進んでいるダウンロードも待ちもありません" };
   fs.writeFileSync(path.join(MODELS_STATE, `dl-${id}.stop`), "1");
   const d = downloads.get(id);
   if (d) {
@@ -713,6 +872,13 @@ function dlView(id) {
   const v = {};
   for (const k of DL_FIELDS) if (s[k] !== undefined) v[k] = k === "verify" && s.verify ? { done_bytes: s.verify.done_bytes, total_bytes: s.verify.total_bytes, bad: s.verify.bad } : s[k];
   return v;
+}
+
+// The waiting list for the page: the running one first. kind tells a model from a shared part.
+function queueView(cat) {
+  const act = activeDownload(cat);
+  return queueRead().map((id) => ({ id, m: itemById(cat, id) })).filter((x) => x.m).map(({ id, m }) => ({
+    id, name: m.name, kind: (cat.models || []).some((x) => x.id === id) ? "model" : "shared", active: id === act }));
 }
 
 // Which one suits this PC: the largest whose experts all fit in this RAM (fits_ram_gib, in the GB a PC is sold with:
@@ -735,6 +901,9 @@ function modelsView() {
   const runningModel = snapshot.online ? (cat.models || []).find((m) => m.match && new RegExp(m.match, "i").test(snapshot.model || "")) : null;
   const choice = readJson(choiceFile());
   const shared = sharedState(cat);
+  const wanted = sharedWanted(cat);
+  const queue = queueView(cat);
+  const inQueue = new Set(queue.map((x) => x.id));
   const models = (cat.models || []).map((m) => {
     const loc = localState(m);
     return {
@@ -742,10 +911,12 @@ function modelsView() {
       fits_ram_gib: m.fits_ram_gib || null, fits: fitsOf(m), short: ramShort(m) ? "ram" : vramShort(m) ? "vram" : null, recommended: !!rec && rec.id === m.id, default_r: m.default_r ?? null, pending: !!m.pending,
       local: loc, shared_missing: loc.complete ? (LAUNCHER ? shared.filter((x) => !x.optional && !x.local.complete).map((x) => x.name) : sharedMissing(m)) : [],
       free_bytes: freeBytes(m.local_dir), download: dlView(m.id), running: !!runningModel && runningModel.id === m.id,
+      // 11/17 W1: the shared parts its download would bring (not here, not already on the list), and how much they are
+      shared_pending: wanted.filter((s) => !inQueue.has(s.id)).map((s) => s.name), shared_bytes: wanted.filter((s) => !inQueue.has(s.id)).reduce((a, s) => a + itemLeft(s), 0),
     };
   });
   return {
-    ok: true, ram_gib: Math.round(ram * 10) / 10, models, active: activeDownload(cat), catalog_error: cat.error || null,
+    ok: true, ram_gib: Math.round(ram * 10) / 10, models, active: activeDownload(cat), queue, catalog_error: cat.error || null,
     running: runningModel ? { model: runningModel.id, r: choice && choice.model === runningModel.id ? choice.r ?? null : null } : null,
     choice: choice ? { model: choice.model, r: choice.r ?? null } : null,
     // 11/15 app1115: the shared parts, whether this is a first run (no model, or a shared part missing), and whether the launcher
@@ -761,13 +932,14 @@ async function modelsRoute(req, res, url, action) {
     lastAsked = Date.now();
     if (!action) return sendJson(res, modelsView());
     const cat = readCatalog();
-    return sendJson(res, { ok: true, active: activeDownload(cat), downloads: Object.fromEntries([...(cat.models || []), ...(cat.shared || [])].map((m) => [m.id, dlView(m.id)])) });
+    return sendJson(res, { ok: true, active: activeDownload(cat), queue: queueView(cat), downloads: Object.fromEntries([...(cat.models || []), ...(cat.shared || [])].map((m) => [m.id, dlView(m.id)])) });
   }
   if (!(await dshLoggedIn(req))) return sendJson(res, { ok: false, error: "dsh にログインしていません" }, 403);
   logAccess(req, res);
   const id = url.searchParams.get("id") || "";
   if (action === "cancel") return sendJson(res, cancelDownload(id));
-  return sendJson(res, await startDownload(id, action === "verify"));
+  if (action === "verify") return sendJson(res, await startDownload(id, true));
+  return sendJson(res, enqueueDownload(id));   // 11/17 W1: a download is put on the list (D: with its shared parts, E: behind the others)
 }
 
 function proxy(req, res) {
@@ -812,7 +984,7 @@ async function strataRead(req, res, url, name) {
 }
 
 
-// --- 11/15 係 C: the context settings (GET /m/ctx = sync.py ctx --json) and the Hugging Face read token (/m/hf-token) ---
+// --- 11/15 係 C: the context settings (GET /m/ctx = sync.py ctx --json) and the Hugging Face read token (/m/hf-token, status only since 11/17) ---
 // The token lives in this app's own place (SYNC_HOME\hf, given to huggingface_hub as HF_HOME); the PC's own login is not
 // used or read. It goes to models/model_dl.py on its standard input, never in a command line, a log or an answer.
 async function ctxRoute(req, res) {
@@ -885,24 +1057,13 @@ function hfTokenTool(args, input) {
   }), (e) => ({ ok: false, error: e.message }));
 }
 
-async function hfTokenRoute(req, res, url) {
-  if (req.method === "GET") {
-    if (!(await dshCookieOk(req))) { logAccess(req, res); return sendJson(res, { ok: false, auth: false }, 401); }
-    if (!HF_APP_HOME) return sendJson(res, { ok: true, available: false, set: false });
-    const r = await hfTokenTool(["status"]);
-    return sendJson(res, { ok: !!r.ok, available: true, set: !!r.set, ...(r.ok ? {} : { error: r.error }) });
-  }
-  if (!HF_APP_HOME) return sendJson(res, { ok: false, error: "この中継ではトークンを扱いません" }, 404);
-  if (!(await dshLoggedIn(req))) return sendJson(res, { ok: false, error: "dsh にログインしていません" }, 403);
-  logAccess(req, res);
-  const action = url.searchParams.get("action");
-  if (action === "clear") return sendJson(res, await hfTokenTool(["clear"]));
-  if (action !== "set") return sendJson(res, { ok: false, error: "action は set か clear です" }, 400);
-  let body = null;
-  try { body = JSON.parse((await readBody(req, 4096)) || "null"); } catch { body = null; }
-  const tok = body && typeof body.token === "string" ? body.token.trim() : "";
-  if (!/^[A-Za-z0-9_\-]{8,200}$/.test(tok)) return sendJson(res, { ok: false, error: "トークンの形が違います（hf_ で始まる文字列）" }, 400);
-  return sendJson(res, await hfTokenTool(["set"], tok));
+// 11/17 W1 (C): the token field is gone from the page, so the relay no longer sets or clears it (POST is refused; 404).
+// Only the status stays (GET: whether a token is saved). A token is put in from a terminal (model_dl.py token set --hf-home <SYNC_HOME>/hf).
+async function hfTokenRoute(req, res) {
+  if (!(await dshCookieOk(req))) { logAccess(req, res); return sendJson(res, { ok: false, auth: false }, 401); }
+  if (!HF_APP_HOME) return sendJson(res, { ok: true, available: false, set: false });
+  const r = await hfTokenTool(["status"]);
+  return sendJson(res, { ok: !!r.ok, available: true, set: !!r.set, ...(r.ok ? {} : { error: r.error }) });
 }
 
 
@@ -917,6 +1078,74 @@ async function envRoute(req, res) {
   const pick = (it) => Object.fromEntries(["key", "gpu", "driver", "need", "vram_gib", "ram_gib"].filter((k) => it && it[k] != null).map((k) => [k, it[k]]));
   const blockers = (d.blockers || []).map(pick);
   return sendJson(res, { ok: true, supported: !blockers.length, blockers, warnings: (d.warnings || []).map(pick) });
+}
+
+// --- 11/17 係 W5: how much memory the other apps use (GET /m/sysmem = sync.py mem --json) ---
+// RAM, the Windows commit, VRAM, the biggest other apps and Strata's own share, as keys and numbers only; the page words them.
+// The page polls it every few seconds while the memory view is open, so an answer is kept for 4 s and one run is shared by
+// callers that arrive meanwhile (the probe takes 1-2 s).
+const memCache = { at: 0, body: null, pending: null };
+async function sysmemRoute(req, res) {
+  if (!LAUNCHER) return sendJson(res, { ok: false, error: "この中継は起動の道具から起こされていません" }, 404);
+  if (!(await dshCookieOk(req))) { logAccess(req, res); return sendJson(res, { ok: false, auth: false }, 401); }
+  if (memCache.body && Date.now() - memCache.at < 4000) return sendJson(res, memCache.body);
+  if (!memCache.pending) {
+    memCache.pending = launcher(["mem", "--json"], 15000).then((r) => {
+      let b;
+      try { b = JSON.parse(r.out.trim().split("\n").pop()); } catch { b = { ok: false, error: (r.err || "メモリを調べられませんでした").trim() }; }
+      memCache.body = b;
+      memCache.at = b && b.ok ? Date.now() : 0;
+      return b;
+    }).finally(() => { memCache.pending = null; });
+  }
+  return sendJson(res, await memCache.pending);
+}
+
+// --- 11/18 係 W9: updates. GET /m/update = sync.py update check --json (reads the list of new versions, downloads nothing; ?local=1 = no
+// network, only the version now); POST /m/update/apply = sync.py update apply --json (starts the updater apart from the app and returns;
+// the updater closes everything, this relay included, swaps the changed parts and starts the app again). ---
+// "From the PC only": applying closes the app on the PC, so it is refused for a phone (LAN, Tailscale or tunnel), the same fence as lan_remote.
+const LOOP_ADDR = /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/;
+function isPcRequest(req) {
+  const host = String(req.headers.host || "").toLowerCase();
+  return LOOP_ADDR.test(String(req.socket.remoteAddress || "")) && LOOP_ADDR.test(String(req.socket.localAddress || ""))
+    && /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host) && !req.headers["x-forwarded-for"] && !req.headers["cf-connecting-ip"];
+}
+const updCache = { at: 0, body: null, pending: null };
+// what a phone does not need to see: where on the PC things are (the PC's own page keeps the folders for "put the zip here")
+const updView = (b, pc) => { const o = { ...b, pc }; delete o.tool; delete o.app; if (!pc) { delete o.folders; delete o.zip; } return o; };
+const lastJsonLine = (s) => { const l = String(s || "").trim().split("\n").reverse().find((x) => x.startsWith("{")); try { return l ? JSON.parse(l) : null; } catch { return null; } };
+async function updateCheckRoute(req, res, url) {
+  if (!LAUNCHER) return sendJson(res, { ok: false, error: "この中継は起動の道具から起こされていません" }, 404);
+  if (!(await dshCookieOk(req))) { logAccess(req, res); return sendJson(res, { ok: false, auth: false }, 401); }
+  const local = url.searchParams.get("local") === "1";
+  const pc = isPcRequest(req);
+  if (!local && updCache.body && Date.now() - updCache.at < 20000) return sendJson(res, updView(updCache.body, pc));
+  if (local) {
+    const r = await launcher(["update", "check", "--json", "--local"], 20000);
+    return sendJson(res, updView(lastJsonLine(r.out) || { ok: false, kind: "old_tool" }, pc));
+  }
+  if (!updCache.pending) {
+    updCache.pending = launcher(["update", "check", "--json"], 90000).then((r) => {
+      const b = lastJsonLine(r.out) || { ok: false, kind: "old_tool", detail: (r.err || r.out).trim().split("\n").pop() };   // an old launcher has no "update"
+      updCache.body = b;
+      updCache.at = b && b.ok ? Date.now() : 0;
+      return b;
+    }).finally(() => { updCache.pending = null; });
+  }
+  return sendJson(res, updView(await updCache.pending, pc));
+}
+async function updateApplyRoute(req, res, url) {
+  if (!LAUNCHER) return sendJson(res, { ok: false, error: "この中継は起動の道具から起こされていません" }, 404);
+  if (!(await dshLoggedIn(req))) return sendJson(res, { ok: false, error: "dsh にログインしていません" }, 403);
+  logAccess(req, res);
+  if (!isPcRequest(req)) return sendJson(res, { ok: false, kind: "pc_only", error: "更新は PC の画面から行ってください" }, 403);
+  if (job && !job.endedAt) return sendJson(res, { ok: false, kind: "busy", error: "起動か終了の途中です" });
+  const lang = url.searchParams.get("lang");
+  const r = await launcher(["update", "apply", "--json", ...(["ja", "en", "zh"].includes(lang) ? ["--lang", lang] : [])], 20000);
+  const d = lastJsonLine(r.out) || { ok: false, kind: "old_tool", error: (r.err || r.out).trim().split("\n").pop() };
+  updCache.at = 0;
+  return sendJson(res, { ok: !!d.ok, started: !!d.started, window: !!d.window, log: d.log, kind: d.kind, error: d.error || d.detail });
 }
 
 const server = http.createServer((req, res) => {
@@ -939,7 +1168,10 @@ const server = http.createServer((req, res) => {
     if (name === "shutdown" && req.method === "POST") return shutdownRoute(req, res, url);
     if (name === "ctx" && req.method === "GET") return ctxRoute(req, res);   // 11/15 係 C
     if (name === "env" && req.method === "GET") return envRoute(req, res);   // 11/15 係 C env
-    if (name === "hf-token" && (req.method === "GET" || req.method === "POST")) return hfTokenRoute(req, res, url);
+    if (name === "sysmem" && req.method === "GET") return sysmemRoute(req, res);   // 11/17 係 W5
+    if (name === "update" && req.method === "GET") return updateCheckRoute(req, res, url);   // 11/18 係 W9
+    if (name === "update/apply" && req.method === "POST") return updateApplyRoute(req, res, url);
+    if (name === "hf-token" && req.method === "GET") return hfTokenRoute(req, res);
     const models = name.match(/^models(?:\/(progress|download|cancel|verify))?$/);
     if (models && (models[1] === "download" || models[1] === "cancel" || models[1] === "verify") === (req.method === "POST")) {
       return modelsRoute(req, res, url, models[1] || null);
@@ -998,4 +1230,7 @@ server.listen(PORT, "127.0.0.1", () => {
   try { if (Remote) Remote.start({ server, port: PORT, allowed: ALLOWED.names, dshCookieOk, sendJson, logAccess, dsh: DSH }); } catch (e) { console.log(`dsh mobile: スマホの接続を始められません（${e.message}）`); }   // 11/15 係 R
   loadRequests();
   strataLoop();
+  // 11/17 W1 (E): a list left from before the app was closed goes on (a half-fetched file continues where it stopped)
+  queueTick().catch(() => {});
+  setInterval(() => queueTick().catch(() => {}), 5000).unref();
 });

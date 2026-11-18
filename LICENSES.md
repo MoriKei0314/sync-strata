@@ -1,5 +1,3 @@
-<!-- 案（11/15 係 D）。配布物（Windows の zip）とモデルに入る部品のライセンス。npm・Python・Cargo の部品の全部の一覧は tools/collect_licenses.py で作る（THIRD_PARTY_NOTICES は組み立てのときに機械で作る〔要決定〕）。 -->
-
 # Licenses / ライセンス
 
 Sync-Strata's own code is under the [MIT License](LICENSE). The release zip and the models also contain the parts below, each under its own license. The release zip carries every notice in its `licenses/` folder (`licenses/README.txt` is the index).

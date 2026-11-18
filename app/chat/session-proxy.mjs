@@ -20,6 +20,16 @@
 // config's slot_save_path), MIN_SAVE_TOKENS 3000, MAX_FILES 16, MAX_GIB 24, PROXY_LOG,
 // PROXY_ALLOWED_HOSTS (11/14: Host names allowed besides loopback; empty by default, see refusal()).
 //
+// 11/18 W11 (head warm-up): the launcher warms Strata with dsh's real head so that the first chat after a start does not read the
+// whole head (system prompt and tool list, ~7K tokens, about a minute on a slow PC).
+//  - Head record: when WARM_HEAD_FILE is set, the head of dsh's chat requests (the leading system/developer messages, the tool list
+//    and the arguments that shape the prompt; never a user or assistant message) is written to that file, only when a new head
+//    appears, the most used head changes, or a head's count reaches a power of two. At most MAX_HEADS (4) heads are kept.
+//  - Warm-up request: a POST .../chat/completions with the header "x-sync-warm: 1" is answered 202 at once and queued like any other
+//    request (the real requests that come meanwhile wait their turn). The proxy does not save or restore around it, forgets what
+//    Strata holds afterwards, and does not count it as a head. A queued warm-up is dropped, and a running one is cancelled, when a
+//    real request with another head arrives (the warm-up would only delay it). GET /proxy/status has "warm_head": true.
+//
 // 11/13 (Linux): a request that continues what this proxy last saw Strata hold is sent as "continues" only when Strata's
 // last request (/metrics) is still the one this proxy sent. Before, prepare() trusted it without asking, so after a
 // Strata restart (stop-strata saves the conversation first) or a request sent to Strata directly, the next turn was read
@@ -29,6 +39,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Writable } from "node:stream";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PROXY_PORT || 8081);
@@ -41,6 +52,43 @@ const MAX_BYTES = Number(process.env.MAX_GIB || 24) * 2 ** 30;
 const MAX_AGE_MS = 2 * 24 * 3600e3;
 const ROOT_RESTORE = process.env.ROOT_RESTORE !== "0";   // 11/9: a new chat restores a file for its system prompt (prepare)
 const INDEX = path.join(DIR, "index.json");
+const WARM_HEAD = process.env.WARM_HEAD_FILE || "";   // 11/18 W11: empty = the head is not recorded
+const MAX_HEADS = 4;
+// 11/18 W11: dsh writes "powered by the strata-rN model" into its system message (N = the model name's rank).  When HEAD_MODEL_NAME is
+// set (the launcher passes the loaded model's name), that phrase is replaced by the fixed name before the request goes to Strata, so
+// the head of every rank is the same text and one head checkpoint serves all of them.  The model field (strata-rN -> tail_skip) is
+// not touched.  The name is read, per request, from the first line of HEAD_MODEL_NAME_FILE (the launcher writes it at every start,
+// so a model switch is followed without restarting this proxy; re-read only when the file's mtime changes); without that file
+// (missing or empty) HEAD_MODEL_NAME is used; without both the request is sent as it came.
+const HEAD_MODEL_NAME_ENV = process.env.HEAD_MODEL_NAME || "";
+const HEAD_MODEL_NAME_FILE = process.env.HEAD_MODEL_NAME_FILE || "";
+let nameMtime = -1, nameCache = "";
+function headModelName() {
+  if (HEAD_MODEL_NAME_FILE) {
+    try {
+      const m = fs.statSync(HEAD_MODEL_NAME_FILE).mtimeMs;
+      if (m !== nameMtime) {
+        nameMtime = m;
+        nameCache = fs.readFileSync(HEAD_MODEL_NAME_FILE, "utf8").split(/\r?\n/)[0].replace(/[\x00-\x1f]/g, "").trim().slice(0, 80);
+      }
+      if (nameCache) return nameCache;
+    } catch { nameMtime = -1; nameCache = ""; }
+  }
+  return HEAD_MODEL_NAME_ENV;
+}
+// also the name an earlier request was given (a head recorded before a model switch is brought to the current name)
+const PERSONA_RE = /powered by the (?:strata(?:-r[0-9]+|-vision)?|Qwen3\.8-Flash-Next Sync-[A-Za-z]+) model/g;
+function unifyPersona(j, name) {
+  if (!name) return false;
+  let changed = false;
+  const fix = (s) => s.replace(PERSONA_RE, () => { changed = true; return `powered by the ${name} model`; });
+  for (const m of j.messages) {          // only the leading system/developer messages (the head)
+    if (!m || (m.role !== "system" && m.role !== "developer")) break;
+    if (typeof m.content === "string") m.content = fix(m.content);
+    else if (Array.isArray(m.content)) for (const p of m.content) if (p && typeof p.text === "string") p.text = fix(p.text);
+  }
+  return changed;
+}
 
 // --- log ---
 const stamp = () => new Date().toLocaleString("sv-SE").replace("T", " ");
@@ -72,6 +120,65 @@ function lcp(a, b) {
   return i;
 }
 const isPrefix = (a, b) => a.length <= b.length && lcp(a, b) === a.length;
+
+// --- the head of dsh's requests (11/18 W11) ---
+// Not part of a head: the messages from the first user message on, and the arguments that do not shape the prompt.
+const HEAD_DROP = new Set(["messages", "stream", "stream_options", "store", "max_tokens", "max_completion_tokens", "temperature", "top_p",
+  "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "n", "stop", "user", "metadata", "logprobs", "top_logprobs",
+  "strata_tune", "strata_checkpoint", "strata_prefix"]);
+function headOf(j) {
+  if (!Array.isArray(j.messages) || !Array.isArray(j.tools) || !j.tools.length) return null;
+  const lead = [];
+  for (const m of j.messages) {
+    if (m && (m.role === "system" || m.role === "developer")) lead.push(m); else break;
+  }
+  if (!lead.length || lead.length === j.messages.length) return null;   // no system message, or nothing after it
+  const body = {};
+  for (const k of Object.keys(j)) if (!HEAD_DROP.has(k)) body[k] = j[k];
+  body.messages = lead;
+  return body;
+}
+let heads = [];       // [{key, count, last, body}]
+let headLeader = null;
+const leaderOf = () => [...heads].sort((a, b) => b.count - a.count || (a.last < b.last ? 1 : -1))[0]?.key ?? null;
+function loadHeads() {
+  if (!WARM_HEAD) return;
+  try {
+    const j = JSON.parse(fs.readFileSync(WARM_HEAD, "utf8"));
+    heads = (j.heads || []).filter((h) => h && h.key && h.body && Array.isArray(h.body.messages)).slice(0, MAX_HEADS);
+  } catch { heads = []; }
+  headLeader = leaderOf();
+}
+function writeHeads() {
+  try {
+    fs.mkdirSync(path.dirname(WARM_HEAD), { recursive: true });
+    fs.writeFileSync(WARM_HEAD + ".tmp", JSON.stringify({ version: 1, note: "the head (system messages, tools, prompt-shaping arguments) of dsh's requests; no user or assistant messages", heads }, null, 1));
+    fs.renameSync(WARM_HEAD + ".tmp", WARM_HEAD);
+  } catch (e) { log(`head record not written: ${e.message}`); }
+}
+function recordHead(key, body) {
+  if (!WARM_HEAD || !key) return;
+  const now = new Date().toISOString();
+  let h = heads.find((x) => x.key === key);
+  let write = false;
+  if (!h) {
+    h = { key, count: 0, last: now, body };
+    heads.push(h);
+    write = true;
+    log(`head record: a new head (${heads.length} kept)`);
+  }
+  h.count++;
+  h.last = now;
+  if ((h.count & (h.count - 1)) === 0) write = true;              // 1, 2, 4, 8, ...
+  if (heads.length > MAX_HEADS) {
+    const gone = heads.filter((x) => x !== h).sort((a, b) => a.count - b.count || (a.last < b.last ? -1 : 1))[0];
+    heads = heads.filter((x) => x !== gone);
+    write = true;
+  }
+  const lead = leaderOf();
+  if (lead !== headLeader) { headLeader = lead; write = true; }
+  if (write) writeHeads();
+}
 
 // --- saved conversations (index.json in the session folder) ---
 let entries = [];
@@ -107,7 +214,8 @@ let live = null;      // {seq, tokens, fresh}: fresh = a file holds it exactly a
 let lastId = null;    // Strata's id of the last request this proxy sent (/metrics "requests"[0].id)
 let slotsOffUntil = 0; // Strata said 501 (started without slot_save_path): requests just pass, asking again later
 const slotsOff = () => Date.now() < slotsOffUntil;
-const stats = { requests: 0, continued: 0, saves: 0, restores: 0, refusals: 0, save_ms: 0, restore_ms: 0 };
+const stats = { requests: 0, continued: 0, saves: 0, restores: 0, refusals: 0, save_ms: 0, restore_ms: 0, warms: 0, warms_dropped: 0 };
+let warming = null;   // 11/18 W11: the warm-up job being sent to Strata now
 
 function call(method, pathname, body, timeoutMs) {
   return new Promise((resolve) => {
@@ -212,6 +320,7 @@ async function restore(e) {
 // Before a request: keep it as it is when it continues what Strata holds; otherwise save that and restore the longest
 // saved conversation the request continues, when that reaches further than what Strata would reuse anyway.
 async function prepare(job) {
+  if (job.warm) { job.note = "warm head"; return; }   // 11/18 W11: no save or restore around a warm-up
   if (live && isPrefix(live.seq, job.seq)) {
     // 11/13: only while Strata still holds it (an unanswered /metrics keeps the old belief, as a failed check did not drop it before)
     const top = await lastRequest();
@@ -254,6 +363,12 @@ async function after(job) {
     return;
   }
   lastId = top.id;
+  if (job.warm) {     // 11/18 W11: Strata now holds the warm-up's conversation; the real ones start from its head checkpoint
+    live = null;
+    stats.warms++;
+    log(`#${job.n} warm head: prompt ${fmt(top.prompt_tokens)} (reused ${fmt(top.reused)}, read ${fmt(top.prompt_read ?? (top.prompt_tokens || 0) - (top.reused || 0))} in ${((top.prompt_ms || 0) / 1000).toFixed(1)} s), ${top.finish}`);
+    return;
+  }
   live = { seq: job.seq, tokens: (top.prompt_tokens || 0) + (top.output_tokens || 0), fresh: false };
   if (job.partial && (top.reused || 0) < 1000) {   // the restored file held no checkpoint at the system prompt's end
     job.partial.noRoot = true;
@@ -345,6 +460,12 @@ async function pump() {
     const job = queue.shift();
     if (job.gone) { log(`#${job.n} the client left while it waited`); continue; }
     job.waited = Date.now() - job.at;
+    if (job.warm && queue.some((q) => !q.warm && q.headKey && q.headKey !== job.headKey)) {   // 11/18 W11: another head is waiting
+      stats.warms_dropped++;
+      log(`#${job.n} warm head dropped: a request with another head is waiting`);
+      continue;
+    }
+    if (job.warm) warming = job;
     for (;;) {
       await holdUntilUp(job);     // gives up after HOLD_MIN: the request then fails as it did before
       if (job.gone) break;
@@ -361,11 +482,19 @@ async function pump() {
       break;
     }
     if (job.gone && !job.started) log(`#${job.n} the client left before it was sent`);
+    if (job === warming) warming = null;
   }
   busy = false;
 }
 
-function chat(req, res, body) {
+// 11/18 W11: a response that goes nowhere (the warm-up's answer is not needed)
+class Sink extends Writable {
+  constructor() { super(); this.headersSent = false; }
+  writeHead() { this.headersSent = true; return this; }
+  _write(chunk, enc, cb) { cb(); }
+}
+
+function chat(req, res, body, warm = false) {
   let j;
   try { j = JSON.parse(body.toString("utf8")); } catch { return passThrough(req, res, body); }
   if (!j || !Array.isArray(j.messages)) return passThrough(req, res, body);
@@ -373,14 +502,27 @@ function chat(req, res, body) {
   // (strata_tune.tail_skip -> server.py -> the engine's tail_skip=R).  Other model names: the start-up rank.
   // 11/15 本人: strata-r10 は「省かない」．エンジンは tail_skip を 0〜9 に切るので，10 ではなく 0（切）を送る
   const tm = typeof j.model === "string" ? /^strata-r([0-9]+)$/.exec(j.model) : null;
+  const hname = headModelName();
+  let dirty = unifyPersona(j, hname);   // 11/18 W11
   if (tm) {
     const tune = j.strata_tune && typeof j.strata_tune === "object" ? j.strata_tune : {};
     const r = Number(tm[1]);
     j.strata_tune = { ...tune, tail_skip: r >= 10 ? 0 : r };
-    body = Buffer.from(JSON.stringify(j), "utf8");
+    dirty = true;
   }
-  const job = { n: ++counter, req, res, body, seq: seqOf(j), at: Date.now(), started: false, gone: false };
+  if (dirty) body = Buffer.from(JSON.stringify(j), "utf8");
+  const hb = headOf(j);
+  const headKey = hb ? hash(hname ? { ...hb, model: null } : hb) : null;   // 11/18 W11: with the unified head the model (rank) does not make another head
+  const job = { n: ++counter, req, res, body, seq: seqOf(j), at: Date.now(), started: false, gone: false, warm, headKey };
   stats.requests++;
+  if (!warm) {
+    recordHead(headKey, hb);
+    if (warming && headKey && headKey !== warming.headKey) {   // the running warm-up would only delay this request
+      log(`#${job.n} another head than the warm-up's: cancelling the warm-up #${warming.n}`);
+      warming.gone = true;
+      if (warming.cancel) warming.cancel();
+    }
+  }
   if (tm) log(`#${job.n} model ${j.model}: tail skip ${tm[1]}`);
   // A streaming client that waits its turn (or a save and a restore) gets the stream's headers and SSE comments, as
   // Strata itself sends while a request waits in its queue, so it does not give up on a silent connection.
@@ -431,7 +573,8 @@ async function saveLive(res) {
 
 function status(res) {
   const body = {
-    upstream: UPSTREAM.href, dir: DIR, slots: !slotsOff(), queue: queue.length, busy,
+    upstream: UPSTREAM.href, dir: DIR, slots: !slotsOff(), queue: queue.length, busy, warm_head: true,
+    heads: heads.map((h) => ({ count: h.count, last: h.last, model: h.body.model, tools: (h.body.tools || []).length })),
     live: live && { messages: live.seq.length - 1, tokens: live.tokens, saved: live.fresh },
     files: entries.map((e) => ({ file: e.file, messages: e.seq.length - 1, tokens: e.tokens, gib: Number(gib(e.bytes || 0)), used: new Date(e.usedAt).toLocaleString("sv-SE") })),
     stats,
@@ -472,6 +615,23 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ error: { message: refused[1] } }));
   }
   if (req.method === "GET" && req.url === "/proxy/status") return status(res);
+  if (req.method === "POST" && /\/chat\/completions(\?|$)/.test(req.url) && req.headers["x-sync-warm"]) {   // 11/18 W11: warm-up
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      let j = null;
+      try { j = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* answered below */ }
+      if (!j || !Array.isArray(j.messages) || !j.messages.length) {
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "warm-up: no messages" } }));
+      }
+      delete req.headers["x-sync-warm"];
+      res.writeHead(202, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ queued: true, queue: queue.length + (busy ? 1 : 0) }));
+      chat(req, new Sink(), Buffer.from(JSON.stringify(j), "utf8"), true);
+    });
+    return;
+  }
   if (req.method === "POST" && req.url === "/proxy/save-live") { saveLive(res); return; }
   if (req.method === "POST" && /\/chat\/completions(\?|$)/.test(req.url)) {
     const chunks = [];
@@ -491,6 +651,7 @@ server.on("error", (e) => {
 server.listen(PORT, "127.0.0.1", () => {
   loadIndex();
   prune();
+  loadHeads();
   log(`listening on 127.0.0.1:${PORT} -> ${UPSTREAM.href}, session files in ${DIR} (${entries.length} kept)`);
   console.log(`Strata session proxy: 127.0.0.1:${PORT} -> ${UPSTREAM.href} (log: ${LOG})`);
   console.log(`Strata session proxy: accepts Host loopback${EXTRA_HOSTS.size ? ` and ${[...EXTRA_HOSTS].join(", ")} (PROXY_ALLOWED_HOSTS)` : " only"}`);

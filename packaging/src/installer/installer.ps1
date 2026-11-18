@@ -109,22 +109,60 @@ function Read-State {
 }
 $State = Read-State
 
+# ---------------------------------------------------------------- 取り寄せ（11/17 H）
+# GitHub のリリースが非公開のあいだは URL では落ちない（404）．gh（GitHub CLI）があり，その人に見える置き場なら gh release download で落とす．
+function Get-GhRelease([string]$u) {
+    if ($u -match '^https://github\.com/([^/]+)/([^/]+)/releases/(latest/download|download/([^/]+))/([^/?#]+)$') {
+        return [pscustomobject]@{ repo = "$($Matches[1])/$($Matches[2])"; tag = $Matches[4]; name = [Uri]::UnescapeDataString($Matches[5]) }
+    }
+    return $null
+}
+function Invoke-Download([string]$u, [string]$out) {
+    try { Invoke-WebRequest -Uri $u -OutFile $out -UseBasicParsing; return } catch { $why = $_.Exception.Message }
+    $g = Get-GhRelease $u
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $g -or -not $gh) { throw "落とせなかった: $u（$why）" }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('syncstrata-gh-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $d | Out-Null
+    try {
+        $a = @('release', 'download')
+        if ($g.tag) { $a += $g.tag }
+        $a += @('-R', $g.repo, '-p', $g.name, '-D', $d)
+        $ErrorActionPreference = 'Continue'      # gh の stderr を PowerShell 5.1 の止まる誤りにしない（この関数の中だけ）
+        $msg = & $gh.Source @a 2>&1 | ForEach-Object { "$_" }
+        $rc = $LASTEXITCODE
+        $f = Join-Path $d $g.name
+        if ($rc -ne 0 -or -not (Test-Path -LiteralPath $f)) { throw "落とせなかった: $u（URL: $why．gh: $((@($msg) + '?')[0])）" }
+        Move-Item -LiteralPath $f $out -Force
+    } finally { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 # ---------------------------------------------------------------- 版の一覧
+# 11/17 H: 一覧の名前は OS ごと（manifest-windows-x64.json．GitHub のリリースは平らな置き場で，Linux の一覧とぶつかるため）．
+# 無ければ 0.1.0-1115 までの manifest.json．別の OS の一覧は断る（前は確かめが無く，Linux の部品を入れてしまう作りだった）．
+$Platform = 'windows-x64'
 function Open-Feed([string]$src) {
     $isUrl = $src -match '^https?://'
+    $names = @("manifest-$Platform.json", 'manifest.json')
     if ($isUrl) {
-        $murl = if ($src -match '\.json$') { $src } else { $src.TrimEnd('/') + '/manifest.json' }
-        $text = (Invoke-WebRequest -Uri $murl -UseBasicParsing).Content
-        if ($text -is [byte[]]) { $text = $Utf8.GetString($text) }
+        $cands = if ($src -match '\.json$') { @($src) } else { @($names | ForEach-Object { $src.TrimEnd('/') + '/' + $_ }) }
+        $tmpm = Join-Path ([IO.Path]::GetTempPath()) ('syncstrata-m-' + [Guid]::NewGuid().ToString('N') + '.json')
+        $whys = @(); $murl = $null
+        foreach ($c in $cands) {
+            try { Invoke-Download $c $tmpm; $murl = $c; break } catch { $whys += $_.Exception.Message }
+        }
+        if (-not $murl) { throw ($whys -join ' / ') }
+        try { $m = [IO.File]::ReadAllText($tmpm, [Text.Encoding]::UTF8) | ConvertFrom-Json } finally { Remove-Item -LiteralPath $tmpm -Force -ErrorAction SilentlyContinue }
         $base = $murl.Substring(0, $murl.LastIndexOf('/') + 1)
-        $m = $text | ConvertFrom-Json
     } else {
-        $mp = if ($src -match '\.json$') { $src } else { Join-Path $src 'manifest.json' }
+        $mp = if ($src -match '\.json$') { $src } else { @($names | ForEach-Object { Join-Path $src $_ } | Where-Object { Test-Path -LiteralPath $_ }) + @(Join-Path $src 'manifest.json') | Select-Object -First 1 }
         if (-not (Test-Path -LiteralPath $mp)) { throw "版の一覧が無い: $mp" }
         $base = [IO.Path]::GetFullPath((Split-Path -Parent $mp)).TrimEnd('\') + '\'
         $m = Read-JsonFile $mp
     }
-    if ((Get-Prop $m 'product') -ne 'sync-strata' -or (Get-Prop $m 'schema') -ne 1) { throw "Sync-Strata の版の一覧ではない（product・schema が違う）: $src" }
+    if ((Get-Prop $m 'product') -ne 'sync-strata' -or (Get-Prop $m 'schema') -ne 1) { $script:Refused = $true; throw "Sync-Strata の版の一覧ではない（product・schema が違う）: $src" }
+    $pf = [string](Get-Prop $m 'platform' '')
+    if ($pf -and $pf -ne $Platform) { $script:Refused = $true; throw "この一覧は別の OS 用（$pf．この PC は $Platform）: $src" }
     return [pscustomobject]@{ url = $isUrl; base = $base; m = $m; where = $src }
 }
 
@@ -138,7 +176,7 @@ function Get-Archive($feed, $c) {
         New-Item -ItemType Directory -Force $dl | Out-Null
         $p = Join-Path $dl ([IO.Path]::GetFileName(([Uri]$u).AbsolutePath))
         if (-not ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -eq [int64]$c.size -and (Get-Sha256 $p) -eq $c.sha256)) {
-            Invoke-WebRequest -Uri $u -OutFile $p -UseBasicParsing
+            Invoke-Download $u $p
         }
     } else {
         $p = [IO.Path]::GetFullPath((Join-Path $feed.base ($rel -replace '/', '\')))
@@ -158,7 +196,7 @@ function Get-Archive($feed, $c) {
                 New-Item -ItemType Directory -Force $dl | Out-Null
                 $p = Join-Path $dl ([IO.Path]::GetFileName($rel))
                 Say ('   {0} は手元に無いので更新の置き場から取ります（{1:N0} MB）' -f $c.id, ([double]$c.size / 1MB))
-                if (-not ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -eq [int64]$c.size)) { Invoke-WebRequest -Uri $u -OutFile $p -UseBasicParsing }
+                if (-not ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -eq [int64]$c.size)) { Invoke-Download $u $p }
             } else { throw "部品の zip が無い: $p（更新の置き場も決まっていない）" }
         }
     }
@@ -533,6 +571,15 @@ function Set-Stubs {
     $made = @()
     foreach ($x in @(@('update', 'update (only the changed parts)'), @('uninstall', 'uninstall'), @('rollback', 'go back to the version before the last update'))) {
         $p = Join-Path $AppDir ($x[0] + '.cmd')
+        # 11/17 H: update.cmd は部品 pack の update.cmd（1 本で動く更新の道具．新しい一覧と新しい配布の道具を取ってから入れ替える）をそのまま写す
+        $packUpd = Join-Path $AppBin 'pack\update.cmd'
+        if ($x[0] -eq 'update' -and (Test-Path -LiteralPath $packUpd)) {
+            $bytes = [IO.File]::ReadAllBytes($packUpd)
+            if ((Test-Path -LiteralPath $p) -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p)) -eq [Convert]::ToBase64String($bytes))) { continue }
+            [IO.File]::WriteAllBytes($p, $bytes)
+            $made += 'update.cmd'
+            continue
+        }
         $text = ($StubTemplate -replace '\{0\}', $x[1] -replace '\{1\}', $x[0]) -replace "`r?`n", "`r`n"
         if ((Test-Path -LiteralPath $p) -and ([IO.File]::ReadAllText($p) -eq $text)) { continue }
         [IO.File]::WriteAllText($p, $text, (New-Object Text.ASCIIEncoding))
@@ -590,6 +637,7 @@ try {
             Sync-Components $feed $true
             $script:EngineVariant = Get-EngineVariant
             if ($script:EngineVariant -and $script:ExitCode -ne 7) { Sync-Components $feed $true $true }
+            if ($script:ExitCode -ne 7) { Set-Stubs }      # 11/17 H: 新しい部品 pack の update.cmd を入れた先へ（前は setup のときだけ）
             Write-JsonFile $State $StatePath
         }
         'rollback' {

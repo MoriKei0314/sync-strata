@@ -1,12 +1,9 @@
-// 11/15 係 C: two small additions to the start settings, for a relay the launcher (sync.py) started.
+// 11/15 係 C: an addition to the start settings, for a relay the launcher (sync.py) started.
 // - CtxSettings: a "Context settings" button in the start settings; it opens its own sheet with the max context length and
 //   the conversation memory (K/V) quantization, each "automatic" by default. GET /m/ctx (sync.py ctx --json) gives the
 //   values, what "automatic" picks on this PC (marked "Recommended") and, when Strata runs, how far it fits; saving goes
 //   through POST /m/settings like the other start settings. Takes effect from the next start.
-// - HfToken: the Hugging Face read token for a private model. GET /m/hf-token says only whether one is saved (never the
-//   token); POST /m/hf-token?action=set|clear saves it in this app's own place or removes it. The field is a password
-//   field, cleared after saving. Shown in the first-run guide, under a download that failed for a private model, and as a
-//   one-line "saved / remove" row in the start settings.
+// - (11/17 W1: the Hugging Face token field that was here is gone. A token for a private repository is put in from a terminal.)
 // Loaded after setup.js. Uses h, tr, toast, openSheet, I18n from the page.
 "use strict";
 
@@ -88,122 +85,8 @@ const CtxSettings = (() => {
   // for the start settings sheet: the button (small, at the end), then the token row
   function extras() {
     const btn = h("button", { class: "btn slim ghost ctx-open", type: "button", onclick: () => open() }, tr("Context settings"));
-    return [h("div", { class: "set-group ctx-open-row" }, btn), HfToken.settingsRow()];
+    return [h("div", { class: "set-group ctx-open-row" }, btn)];
   }
 
   return { open, extras };
-})();
-
-const HfToken = (() => {
-  let state = null;          // {available, set} or null while unknown
-  const listeners = new Set();
-  const changed = () => { for (const f of listeners) f(); };
-
-  async function load() {
-    try {
-      const r = await fetch("/m/hf-token", { cache: "no-store", credentials: "same-origin" });
-      const b = await r.json().catch(() => ({}));
-      state = r.ok && b.ok ? { available: !!b.available, set: !!b.set } : { available: false, set: false };
-    } catch { state = state || { available: false, set: false }; }
-    changed();
-    return state;
-  }
-
-  async function post(action, token) {
-    let r;
-    try {
-      r = await fetch(`/m/hf-token?action=${action}`, { method: "POST", headers: { "x-dsh-mobile": "1", "content-type": "application/json" },
-        credentials: "same-origin", cache: "no-store", body: JSON.stringify(token ? { token } : {}) });
-    } catch {
-      throw new Error(tr("Cannot reach the PC"));
-    }
-    const b = await r.json().catch(() => ({}));
-    if (!r.ok || !b.ok) throw new Error(b.error || tr("Failed (HTTP {0})", [r.status]));
-    state = { available: true, set: !!b.set };
-    changed();
-    return b;
-  }
-
-  // the field: a password box and Save; once saved, "Token saved" and Remove. onSaved runs after a save (to retry a download).
-  function box(onSaved) {
-    const input = h("input", { class: "text-input mono", type: "password", placeholder: "hf_…", maxlength: 200, autocomplete: "off",
-      autocapitalize: "off", spellcheck: "false", enterkeyhint: "done", "aria-label": tr("Hugging Face token") });
-    const ok = h("button", { class: "btn slim primary", type: "button" }, tr("Save"));
-    const err = h("div", { class: "msel-note fit-warn hidden" });
-    const editRow = h("div", { class: "hf-row" }, input, ok);
-    const savedRow = h("div", { class: "hf-row" }, h("span", { class: "msel-note ok-note" }, tr("Token saved")),
-      h("button", { class: "btn slim ghost", type: "button", onclick: () => remove() }, tr("Delete")));
-    const el = h("div", { class: "msel-item hf-box hidden" }, h("div", { class: "msel-text" },
-      h("div", { class: "msel-name" }, tr("Hugging Face token")),
-      h("div", { class: "msel-note" }, tr("Needed for a private model. A read-only token is enough.")),
-      editRow, savedRow, err));
-    let needed = false;
-    function paint() {
-      const s = state;
-      el.classList.toggle("hidden", !s || !s.available);
-      if (!s) return;
-      editRow.classList.toggle("hidden", s.set && !needed);
-      savedRow.classList.toggle("hidden", !s.set);
-      el.classList.toggle("need", needed);   // the failure itself is the download's own message just above
-    }
-    async function submit() {
-      const v = input.value.trim();
-      if (!v || ok.disabled) return;
-      ok.disabled = true;
-      err.classList.add("hidden");
-      try {
-        await post("set", v);
-        input.value = "";
-        needed = false;
-        toast(tr("The token was saved"));
-        paint();
-        if (onSaved) onSaved();
-      } catch (e) {
-        err.textContent = e.message;
-        err.classList.remove("hidden");
-      }
-      ok.disabled = false;
-    }
-    async function remove() {
-      try { await post("clear"); toast(tr("The token was removed")); } catch (e) { toast(e.message); }
-      paint();
-    }
-    ok.addEventListener("click", submit);
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); submit(); } });
-    listeners.add(paint);
-    if (!state) load(); else paint();
-    // need(true): a download failed because the model is private (mark the box, and show the field even when a token is saved)
-    return { el, need: (v) => { if (needed !== !!v) { needed = !!v; paint(); } } };
-  }
-
-  // one box per model id in the Strata sheet (the same node every render, so typing is kept)
-  const inl = new Map();
-  function inline(id, onSaved) {
-    if (!inl.has(id)) inl.set(id, box(onSaved));
-    const b = inl.get(id);
-    b.need(true);
-    return b.el;
-  }
-
-  // the start settings: one line, whether a token is saved, and Remove (the value is never shown)
-  function settingsRow() {
-    const text = h("span", { class: "muted small" });
-    const rm = h("button", { class: "btn slim ghost", type: "button", onclick: async () => {
-      try { await post("clear"); toast(tr("The token was removed")); } catch (e) { toast(e.message); }
-    } }, tr("Delete"));
-    const el = h("div", { class: "set-group hf-set hidden" }, h("div", { class: "set-label muted small" }, tr("Hugging Face token")),
-      h("div", { class: "hf-row" }, text, rm));
-    const paint = () => {
-      const s = state;
-      el.classList.toggle("hidden", !s || !s.available);
-      if (!s) return;
-      text.textContent = s.set ? tr("Token saved") : tr("No token");
-      rm.classList.toggle("hidden", !s.set);
-    };
-    listeners.add(paint);
-    load();
-    return el;
-  }
-
-  return { load, box, inline, settingsRow, state: () => state };
 })();

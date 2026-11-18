@@ -1,5 +1,3 @@
-<!-- Draft (11/16, D2). Translated from README.ja.md (the Japanese file is the source). Replace <account>; remove the [TBD] / [measuring] marks before release. -->
-
 # Sync-Strata
 
 English | [日本語](README.ja.md)
@@ -16,9 +14,9 @@ A chat app ([dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)) comes with th
 |---|---|
 | OS | Windows 11, Windows 10 (1803 or later), or 64-bit Linux (glibc 2.28 or later: Ubuntu 20.04, Debian 10, RHEL 8 or later, and so on. The author's machine runs Ubuntu 24.04; other distributions are not checked) |
 | GPU | See "Supported GPUs" below |
-| NVIDIA driver | R580 or newer (CUDA 13; on Linux 580.95.05 or newer). The GTX 10 series (CUDA 12 engine) needs 576.57 or newer on Windows and 575.57.08 or newer on Linux |
+| NVIDIA driver | R580 or newer (CUDA 13; on Linux 580.95.05 or newer). The GTX 10 series, V100 and Titan V (CUDA 12 engine) need 576.57 or newer on Windows and 575.57.08 or newer on Linux |
 | CPU | AVX2 is required. CPUs without AVX-512 work, but chat speed drops by about 10% (measured on the author's PC with AVX-512 not used) |
-| RAM, VRAM | [TBD: minimum] (see the table under "Choosing a model") |
+| RAM, VRAM | See the table under "Choosing a model" for the model that fits the RAM in your PC (the minimum amounts are to be measured) |
 | Disk | About 2 GB for the app, plus about 35 GB of shared parts that every model needs, plus the model (Sync-XS about 24 GB, Sync-S about 28 GB, Sync-M about 35 GB). An NVMe SSD is recommended for the model |
 | Admin rights, Python, Node | Not needed (they are included) |
 
@@ -29,11 +27,20 @@ Setup checks your GPU and downloads only the matching engine (Windows and Linux)
 | GPU | Status |
 |---|---|
 | NVIDIA RTX 30 and 40 series | Supported |
-| NVIDIA RTX 20, GTX 16 and RTX 50 series, and data-center Ampere cards such as the A100 | Expected to work (not checked on real hardware) |
-| NVIDIA GTX 10 series (CUDA 12 engine) | Experimental (not checked on real hardware) |
-| AMD Radeon RX 6000, 7000 and 9000 series (HIP engine) | Experimental (not checked on real hardware) |
+| NVIDIA RTX 20, GTX 16 and RTX 50 series | Expected to work (not checked on real hardware) |
+| NVIDIA GTX 10 series, Tesla P100, Tesla V100 and Titan V (CUDA 12 engine) | Experimental (not checked on real hardware) |
+| AMD Radeon RX 6000, 7000 and 9000 series, discrete cards including laptop ones such as the RX 7600M and RX 6700S (HIP engine), on Windows and Linux | Experimental (not checked on real hardware) |
 | The integrated Radeon of AMD Ryzen AI Max (Strix Halo: 8060S, 8050S, 8040S), on Windows and Linux | Experimental (not checked on real hardware) |
-| Other integrated GPUs and Intel GPUs | Not supported (an integrated Radeon on Windows stops the GPU at the start of text generation; on Linux, integrated Radeons other than Strix Halo are not supported either) |
+| NVIDIA data-center Ampere cards such as the A100 | Not checked (the engine may not start) |
+| Other integrated GPUs and Intel GPUs (Intel Arc and integrated) | Not supported (an integrated Radeon on Windows stops the GPU at the start of text generation; on Linux, integrated Radeons other than Strix Halo are not supported either) |
+| NVIDIA Maxwell or older (GTX 900 series and earlier) | Not supported |
+| A GPU with less than 8 GB of memory | Not supported (the engine cannot start, so the app stops with a message) |
+| No GPU, or a CPU without AVX2 | Not supported |
+
+- Only one GPU is used, even if the PC has several. Of the supported ones, the one with the most memory is chosen (the newer generation if the memory is the same), because more GPU memory is faster. A supported NVIDIA GPU comes first; if no NVIDIA GPU is supported, a supported Radeon is used.
+- Macs are not supported.
+- WSL2 (Linux on Windows): the author used it with an NVIDIA GPU to build and check the Linux engine. Running the app there is not checked.
+- On a PC with no screen (a server over SSH), start with `sync up --no-gui` (`./sync.sh up --no-gui` on Linux). It starts the engine and dsh without opening a window.
 
 ## Install
 
@@ -55,7 +62,7 @@ Options (install location, model folder, repair): [docs/INSTALL.md](docs/INSTALL
 
 - **Desktop app**: from the desktop icon. When you close the window you can choose "close the app only", "close the app and dsh" or "close everything". Closing only the app keeps the engine and dsh running.
 - **Phone**: on the PC's screen, set "Phone connection" to "Same Wi-Fi" and scan the QR code that appears with a phone on the same Wi-Fi. From outside your home, use [Tailscale](https://tailscale.com/). The QR code is a one-time pass that expires in 3 minutes; the long-lived key never leaves the PC. A phone's login ends 30 days after the day it scanned the QR code; when 7 days or fewer are left, a warning appears on the phone's screen and in "Connected devices" on the PC, and you can take a device's login back there. On the same Wi-Fi the connection is not encrypted ([docs/REMOTE.md](docs/REMOTE.md)).
-- **Command line**: `sync` in the install folder (`sync.sh` on Linux).
+- **Command line**: `sync` in the install folder (`./sync.sh` on Linux). All commands and options are in [docs/CLI.md](docs/CLI.md).
   ```
   sync up              # start the engine and dsh (no window)
   sync up --api-only   # the API only
@@ -63,7 +70,7 @@ Options (install location, model folder, repair): [docs/INSTALL.md](docs/INSTALL
   sync chat            # chat in the terminal
   sync down            # stop everything
   ```
-- **API**: `http://127.0.0.1:8080/v1` (OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/models`; Anthropic-compatible `/v1/messages`). `sync api` prints the model name and examples. Connecting from another PC needs a key ([docs/API.md](docs/API.md)).
+- **API**: `http://127.0.0.1:8080/v1` (8080 is the default port; if another program is using it, the app moves to a free port, so `sync api` shows the actual one. OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/models`; Anthropic-compatible `/v1/messages`). `sync api` prints the model name and examples. Connecting from another PC needs a key ([docs/API.md](docs/API.md)).
 
 ## Choosing a model
 
@@ -94,7 +101,6 @@ With "auto", the context and quantization follow your VRAM:
 | 12 GB or more | 256K | k8v4 |
 | 10-11 GB | 128K | k8v4 |
 | 8-9 GB | 64K | k4 |
-| 6 GB | [measuring] | [measuring] |
 
 dsh summarizes a chat starting at 188,416 tokens when the context is 262,144 (the smaller of 90% of the context and "context - 65,536 for one reply - 8,192 of margin"). This value is set at every start from your settings, and the same value is shown as "where summarizing starts" in the chat screen.
 
@@ -115,51 +121,40 @@ Updates and uninstalls never delete models, settings or chats unless you say so.
 
 ## Benchmarks
 
-The table below is measured on the author's PC. [Re-measure with the final engine. The current values are from the rel-1115 build of 11/15-16.]
+The table below is measured on the author's PC. The values below were measured with version 0.1.0.
 
-- PC: Ryzen 7 7800X3D, 32 GB RAM (DDR5), RTX 3080 12 GB (also drives the display), NVMe SSD. OS: both Windows 11 and Linux (Ubuntu 24.04)
+- PC: Ryzen 7 7800X3D, 32 GB RAM (DDR5), RTX 3080 12 GB (also drives the display), NVMe SSD. OS: both Windows 11 and Linux (Ubuntu 24.04) (the Linux values are to be measured)
 - Engine: Sync-Strata 0.1.0 (Gyro-S and Gyro-M on upstream Strata 0.2.13.1)
 - **jbench**: upstream Strata's speed benchmark (tokens/s). Decode is the geometric mean of 10 fixed requests (English and Japanese text, code, JSON, copying, each at temperature 0 and 0.7); prefill is the speed of reading a request of about 1,000 tokens. Thinking is off; the value is the median of 3 runs with different seeds.
 - **dsh chat**: average tokens/s of Japanese chats through dsh (thinking "low", default temperature), total tokens divided by total time. 6 casual chats (3-4 turns each, about 18 replies), run 2-3 times with different seeds. dsh's instructions and tool descriptions (about 5,600 tokens) are placed in front every time.
 
 | OS | Model | tail skip | jbench decode | jbench prefill | dsh chat |
 |---|---|---|---:|---:|---:|
-| Windows | Sync-XS | R4 | [measuring] | | |
-| Windows | Sync-XS | R7 | [measuring] | | |
-| Windows | Sync-XS | R10 | [measuring] | | |
+| Windows | Sync-XS | R4, R7, R10 | To be measured | To be measured | To be measured |
 | Windows | Sync-S | R4 | 144.0 | 597 | 104.1 |
 | Windows | Sync-S | R7 | 127.5 | 648 | 90.7 |
 | Windows | Sync-S | R10 | 104.6 | 593 | 80.1 |
 | Windows | Sync-M | R4 | 124.6 | 316 | 92.2 |
 | Windows | Sync-M | R7 | 93.6 | 322 | 75.7 |
 | Windows | Sync-M | R10 | 69.1 | 322 | 59.1 |
-| Windows | Gyro-S (upstream, default) | 7 | 72.6 | 241 | [measuring] |
-| Windows | Gyro-S (upstream, fastest settings) | | | | |
-| Windows | Gyro-M (upstream, default) | 7 | 43.2 | 93 | [measuring] |
-| Windows | Gyro-M (upstream, fastest settings) | 4 | 67.8 | 102 | [measuring] |
-| Linux | Sync-S | R4 | to be measured | to be measured | to be measured |
-| Linux | Sync-S | R7 | to be measured | to be measured | to be measured |
-| Linux | Sync-S | R10 | to be measured | to be measured | to be measured |
-| Linux | Sync-M | R4 | to be measured | to be measured | to be measured |
-| Linux | Sync-M | R7 | to be measured | to be measured | to be measured |
-| Linux | Sync-M | R10 | to be measured | to be measured | to be measured |
-| Linux | Gyro-S (upstream, default) | | to be measured | to be measured | to be measured |
-| Linux | Gyro-S (upstream, fastest settings) | | to be measured | to be measured | to be measured |
-| Linux | Gyro-M (upstream, default) | | to be measured | to be measured | to be measured |
-| Linux | Gyro-M (upstream, fastest settings) | | to be measured | to be measured | to be measured |
-| - | GTX 10 series (CUDA 12 engine) | - | No hardware; not measured | | |
+| Windows | Gyro-S (upstream, default) | 7 | 72.6 | 241 | To be measured |
+| Windows | Gyro-S (upstream, fastest settings) | | To be measured | To be measured | To be measured |
+| Windows | Gyro-M (upstream, default) | 7 | 43.2 | 93 | To be measured |
+| Windows | Gyro-M (upstream, fastest settings) | 4 | 67.8 | 102 | To be measured |
+| - | GTX 10 series, V100, Titan V (CUDA 12 engine) | - | No hardware; not measured | | |
 | - | Radeon RX 6000/7000/9000 (HIP engine) | - | No hardware; not measured | | |
+
+The Linux values (Sync-S, Sync-M and upstream Gyro) are to be measured.
 
 Quality (distance from the original model) is on each model page. Sync-XS quality was measured with the production eval_v4 on Colab. It is on par with the original Sync-XS (the table-lookup form): +0.60% on "scale B", with a 95% range of -0.23 to +1.34%. It is 16.1% better than Gyro-S and 34.8% worse than Sync-S (ratios of KL on scale B; the table is on the [Sync-XS page](https://huggingface.co/hiru2005/Sync-XS)). Speed depends a lot on the PC, especially the amount of RAM, the SSD and what else is running.
 
 ## Limitations and known issues
 
-- Only NVIDIA RTX 30/40 series are checked. RTX 20, GTX 16, RTX 50, GTX 10 and Radeon are not checked on real hardware (table above). Mac, Intel GPUs and integrated GPUs are not supported (only the integrated Radeon of Ryzen AI Max, i.e. Strix Halo such as the 8060S, is supported experimentally on both Windows and Linux). An integrated Radeon on Windows stops the GPU at the start of text generation. On a PC with both a discrete Radeon and an integrated Radeon, the discrete one is used.
+- Only NVIDIA RTX 30/40 series are checked. RTX 20, GTX 16, RTX 50, GTX 10, V100, Titan V and Radeon are not checked on real hardware (table above). Mac, Intel GPUs and integrated GPUs are not supported (only the integrated Radeon of Ryzen AI Max, i.e. Strix Halo such as the 8060S, is supported experimentally on both Windows and Linux). An integrated Radeon on Windows stops the GPU at the start of text generation. On a PC with both a discrete Radeon and an integrated Radeon, the discrete one is used.
 - Images are read on the CPU and take a dozen seconds or so each (every release includes image reading).
 - Apps that use a lot of GPU or memory bandwidth slow it down a lot (CPU contention is handled automatically). `sync doctor` shows which apps are using them.
 - Running on the GPU that also drives your display leaves less VRAM.
 - Part of the calibration text was made from the author's own chat logs (see below).
-- [TBD: add the issues still open at release]
 
 ## About calibration
 

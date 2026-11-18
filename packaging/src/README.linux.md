@@ -30,7 +30,12 @@ Sync-Strata は，自分の PC の GPU で動くローカルの LLM のアプリ
 
 ## 3. 更新する・前の版に戻す・消す
 
-- 更新: `~/.local/share/SyncStrata/update.sh`（アプリの一覧の「Sync-Strata の更新」）．**アプリが動いている間は入れ替えません**．
+- 更新: `~/.local/share/SyncStrata/update.sh`（アプリの一覧の「Sync-Strata の更新」）．変わった部品だけを落とし，sha256 を確かめて入れ替えます．
+  モデルと設定・会話には触れません．新しい版があるときは，入れ替える前にアプリを止めます（`sync.sh down --all`）．
+  新しい版は，更新の置き場（`settings.json` の `update_feed`）→ `gh`（置き場が見えるアカウントでログインしているとき）→
+  手で置いた `SyncStrata-<版>-linux.zip`（`update.sh` と同じフォルダーか `~/Downloads`．展開しなくてよい）の順に探します．
+  置き場を直接指すときは `update.sh --source ~/Downloads/SyncStrata-0.1.1-linux.zip`．戻した版をもう一度入れるときは `update.sh --force`．
+  0.1.0-1115 から上げるときは，リリースのページの `update.sh` を落として `sh update.sh`．
 - 前の版に戻す: `rollback.sh`．消す: `uninstall.sh`（モデルと設定・会話は聞いてから．既定は残す）．
 - 端末から使う: `~/.local/share/SyncStrata/app/launcher/sync.sh up --gui --open`（起こして画面を開く），`sync.sh down --all`（止める），`sync.sh status`．
 

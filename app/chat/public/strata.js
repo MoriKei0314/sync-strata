@@ -162,8 +162,10 @@ const Models = { list: null, legacy: false, error: null };
 // 動いている Strata の設定の名前（/metrics のモデル名から）．11/15: 欄で選んで起動したなら tail skip も（例「Sync-S · R4」）
 function strataPresetName(model) {
   let name = model || "";
-  if (/sync-m/i.test(model || "")) name = STRATA_PRESETS.syncm;
-  else if (/sync-s/i.test(model || "")) name = STRATA_PRESETS.syncs;
+  // 11/16 夜 本人: Sync-XS だけ「qwen3.8-flash-next-sync-xs」と長い小文字で出ていた（前は sync-m・sync-s だけを見ていた）．
+  // 名乗りの最後の「sync-<名前>」から，ほかの物と同じ「Sync-XS」の形に（config.js の strataPresets に名前があればそれ）
+  const pm = /sync-([a-z]+)$/i.exec(model || "");
+  if (pm) name = STRATA_PRESETS["sync" + pm[1].toLowerCase()] || `Sync-${pm[1].toUpperCase()}`;
   const run = Models.list && Models.list.running;
   return run && run.r ? `${name} · R${run.r}` : name;
 }
@@ -181,6 +183,57 @@ const modelDesc = (m) => (m.description && (m.description[I18n.lang] || m.descri
 const modelOf = (id) => ((Models.list && Models.list.models) || []).find((m) => m.id === id) || null;
 const DL_ACTIVE = ["starting", "downloading", "verifying"];
 const dlActive = (m) => !!(m && m.download && DL_ACTIVE.includes(m.download.state));
+
+// 11/17 W1 (D, E): the waiting list (L.queue = [{id, name, kind: "model"|"shared", active}], the one running first). A download
+// press puts the model on it together with the shared parts it lacks; the relay fetches them one after another.
+const queueOf = (id) => ((Models.list && Models.list.queue) || []).find((q) => q.id === id) || null;
+// how many models are ahead of this one on the list (the running one counts)
+function modelsAhead(id) {
+  const qs = (Models.list && Models.list.queue) || [];
+  return qs.slice(0, Math.max(0, qs.findIndex((q) => q.id === id))).filter((q) => q.kind === "model").length;
+}
+function progressText(d) {
+  if (d.state === "starting") return [0, tr("Getting ready…")];
+  if (d.state === "verifying" && d.verify) {
+    const pct = d.verify.total_bytes ? Math.floor((100 * d.verify.done_bytes) / d.verify.total_bytes) : 0;
+    return [pct, tr("Checking the files {0}%", [pct])];
+  }
+  const pct = d.total_bytes ? Math.floor((100 * (d.done_bytes || 0)) / d.total_bytes) : 0;
+  const parts = [`${pct}%`, fmtGiB(d.done_bytes || 0) + " / " + fmtGiB(d.total_bytes || 0), fmtSpeed(d.speed_bps), fmtLeft(d.eta_s)].filter(Boolean);
+  return [pct, parts.join(" · ")];
+}
+// The text for a download that failed: a private repository says what to do (the token is put in from a terminal; there is no field)
+const dlFailText = (d) => (d.error_kind === "auth" ? tr("This is a private repository. Enter the token in a terminal.") : d.error);
+// The shared parts as one row (the page has no row of their own for each): the one being fetched with its progress, how many
+// wait, or why the last try failed. null when there is nothing to show. reg(fill, text) lets a caller update the progress in place.
+function sharedRow(L, onStop, reg) {
+  const qs = (L.queue || []).filter((q) => q.kind === "shared");
+  const bad = (L.shared || []).find((x) => !x.local.complete && x.download && x.download.state === "failed" && x.download.error && !qs.some((q) => q.id === x.id));
+  if (!qs.length && !bad) return null;
+  const lines = [];
+  const acts = [];
+  const cur = qs.find((q) => q.active);
+  const d = cur && (L.shared || []).find((x) => x.id === cur.id);
+  if (cur && d && d.download) {
+    const [pct, text] = progressText(d.download);
+    const fill = h("div", { class: "ctx-fill" });
+    fill.style.width = `${pct}%`;
+    const t = h("div", { class: "msel-note dl-text" }, text);
+    if (reg) reg(fill, t);
+    lines.push(h("div", { class: "msel-note" }, tr("Downloading {0} of {1}", [qs.indexOf(cur) + 1, qs.length])), h("div", { class: "ctx-bar dl-bar" }, fill), t);
+  } else if (qs.length) {
+    lines.push(h("div", { class: "msel-note" }, tr("Waiting to download")));
+  }
+  if (qs.length) acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: onStop }, tr("Stop the download")));
+  if (bad) lines.push(h("div", { class: "msel-note fit-warn" }, dlFailText(bad.download)));
+  return h("div", { class: "msel-item strata-model" }, h("div", { class: "msel-text" },
+    h("div", { class: "msel-name" }, tr("Shared parts")), lines, acts.length ? h("div", { class: "model-acts" }, acts) : null));
+}
+// stops the shared parts on the list (the waiting ones first, then the running one)
+async function stopSharedParts() {
+  const qs = ((Models.list && Models.list.queue) || []).filter((q) => q.kind === "shared");
+  for (const q of [...qs].sort((a, b) => Number(a.active) - Number(b.active))) await modelsPost("cancel", q.id);
+}
 
 async function modelsPost(action, id) {
   let r;
@@ -273,7 +326,21 @@ function jobName(job) {
   return name && job.r ? `${name} R${job.r}` : name;
 }
 
-function openStrataSheet() {
+// 11/17 係 W6: the engine could not start again for lack of GPU memory ("seat_short"): suggest a lighter model.
+// strata.restart_note comes from /m/strata (the engine's GET /v1/status); a 503 text with "seat_short" in a chat says the same.
+const SeatShort = {
+  noted() { const st = Store.S.strata; return !!(st && st.restart_note === "seat_short" && !st.online); },   // 遅い起動で動いているときは「起動できませんでした」と出さない
+  has(text) { return /seat_short/.test(String(text || "")); },
+  el() {
+    return h("div", { class: "seat-short" },
+      h("div", { class: "seat-short-text" }, tr("The GPU memory was not enough to start this model. A lighter model (Sync-XS) is likely to start.")),
+      h("button", { class: "btn slim", type: "button", onclick: () => openStrataSheet({ light: true }) }, tr("Choose a lighter model")));
+  },
+};
+
+function openStrataSheet(opts) {
+  let wantLight = !!(opts && opts.light);   // 11/17 係 W6: from the seat_short notice: the lightest model is chosen first
+  const seatBox = h("div", { class: "seat-short-box hidden" });
   const state = h("div", { class: "strata-state" });
   const logBox = h("pre", { class: "job-log hidden" });
   const btn = h("button", { class: "btn wide-in", type: "button" });
@@ -295,6 +362,10 @@ function openStrataSheet() {
   function defaultSel() {
     const L = Models.list;
     const ms = ((L && L.models) || []).filter((x) => !x.pending);   // 11/15: 準備中のモデルは選ばない
+    if (wantLight && ms.length) {   // 11/17 係 W6: the lightest model (the smallest experts) first
+      const lm = ms.slice().sort((a, b) => (a.experts_gib || 0) - (b.experts_gib || 0))[0];
+      return { model: lm.id, r: lm.default_r || (Spec.v && Spec.v.recommended_r) || 7 };
+    }
     const ok = (id) => { const m = ms.find((x) => x.id === id); return m && m.local.complete ? m : null; };
     const run = L && L.running;
     const m = (run && ms.find((x) => x.id === run.model)) || (L && L.choice && ok(L.choice.model)) || ms.find((x) => x.recommended && x.local.complete)
@@ -305,16 +376,6 @@ function openStrataSheet() {
     return { model: m.id, r: SHOWN_R.includes(r) ? r : rec || 7 };
   }
 
-  function progressText(d) {
-    if (d.state === "starting") return [0, tr("Getting ready…")];
-    if (d.state === "verifying" && d.verify) {
-      const pct = d.verify.total_bytes ? Math.floor((100 * d.verify.done_bytes) / d.verify.total_bytes) : 0;
-      return [pct, tr("Checking the files {0}%", [pct])];
-    }
-    const pct = d.total_bytes ? Math.floor((100 * (d.done_bytes || 0)) / d.total_bytes) : 0;
-    const parts = [`${pct}%`, fmtGiB(d.done_bytes || 0) + " / " + fmtGiB(d.total_bytes || 0), fmtSpeed(d.speed_bps), fmtLeft(d.eta_s)].filter(Boolean);
-    return [pct, parts.join(" · ")];
-  }
 
   function act(fn) {
     return async (e) => {
@@ -348,12 +409,18 @@ function openStrataSheet() {
     lines.push(h("div", { class: `msel-note${m.fits ? "" : " fit-warn"}` }, m.fits
       ? tr("Runs fine on this PC", [I18n.num(Math.round(m.experts_gib * 10) / 10)])
       : m.short === "vram" ? tr("Slow on this PC (not enough VRAM)")
+      : m.fits_ram_gib ? tr("This model is for {0} GB of RAM. This PC ({1} GB) reads part of it from the SSD, so it is slower.", [m.fits_ram_gib, Math.round(L.ram_gib)])
       : tr("Slow on this PC (not enough RAM)", [I18n.num(L.ram_gib), I18n.num(Math.round(m.experts_gib * 10) / 10)])));
     if (m.shared_missing && m.shared_missing.length) {
       lines.push(h("div", { class: "msel-note fit-warn" }, tr("Missing files: {0}", [m.shared_missing.join(", ")])));
     }
     const acts = [];
-    if (dlActive(m)) {
+    const qm = queueOf(m.id);
+    if (qm && !qm.active && !dlActive(m)) {   // 11/17 W1: on the list, its turn has not come
+      const ahead = modelsAhead(m.id);
+      lines.push(h("div", { class: "msel-note" }, ahead ? tr("Waiting · {0} ahead", [ahead]) : tr("Waiting · next")));
+      acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: act(() => modelsPost("cancel", m.id)) }, tr("Take off the list")));
+    } else if (dlActive(m)) {
       const [pct, text] = progressText(d);
       const fill = h("div", { class: "ctx-fill" });
       fill.style.width = `${pct}%`;
@@ -363,10 +430,7 @@ function openStrataSheet() {
       acts.push(h("button", { class: "btn slim ghost", type: "button", onclick: act(() => modelsPost("cancel", m.id)) },
         d.state === "verifying" || d.mode === "verify" ? tr("Stop the check") : tr("Stop the download")));
     } else {
-      if (d && d.state === "failed" && d.error) lines.push(h("div", { class: "msel-note fit-warn" }, d.error));
-      if (d && d.state === "failed" && d.error_kind === "auth" && typeof HfToken !== "undefined") {   // 11/15 係 C
-        lines.push(HfToken.inline(m.id, () => modelsPost("download", m.id).then(() => loadModels()).catch((e) => toast(e.message))));
-      }
+      if (d && d.state === "failed" && d.error) lines.push(h("div", { class: "msel-note fit-warn" }, dlFailText(d)));
       if (d && (d.state === "stopped" || d.state === "interrupted") && !loc.complete) {
         const pct = d.total_bytes ? Math.floor((100 * (d.done_bytes || 0)) / d.total_bytes) : null;
         lines.push(h("div", { class: "msel-note" }, pct != null ? tr("Download stopped at {0}%", [pct]) : tr("Download stopped")));
@@ -374,12 +438,23 @@ function openStrataSheet() {
       if (d && d.state === "done" && d.mode === "download" && loc.complete) lines.push(h("div", { class: "msel-note ok-note" }, tr("Download complete")));
       if (d && d.state === "done" && d.mode === "verify" && loc.verified) lines.push(h("div", { class: "msel-note ok-note" }, tr("The files are fine")));
       const busyOther = L.active && L.active !== m.id;
+      // 11/17 W1: the button is always on: another download may be running, this one then waits its turn (D: the shared parts the
+      // model lacks come with it, so the size on the button includes them)
+      const press = act(async () => {
+        sel = { model: m.id, r: sel ? sel.r : 7 }; picked = true;
+        const wait = !!(L.queue && L.queue.length);
+        await modelsPost("download", m.id);
+        if (wait) toast(tr("Added to the list. It starts after the others."));
+      });
       if (!loc.complete) {
         const resume = loc.have_bytes + loc.partial_bytes > 0;
-        acts.push(h("button", { class: "btn slim primary", type: "button", disabled: busyOther, onclick: act(async () => { sel = { model: m.id, r: sel ? sel.r : 7 }; picked = true; await modelsPost("download", m.id); }) },
-          resume ? tr("Resume the download") : tr("Download ({0})", [fmtGiB(loc.total_bytes - loc.have_bytes)])));
-      } else if (!loc.verified && !m.running) {
-        acts.push(h("button", { class: "btn slim ghost", type: "button", disabled: busyOther, onclick: act(() => modelsPost("verify", m.id)) }, tr("Check the files")));
+        acts.push(h("button", { class: "btn slim primary", type: "button", onclick: press },
+          resume ? tr("Resume the download") : tr("Download ({0})", [fmtGiB(loc.total_bytes - loc.have_bytes + (m.shared_bytes || 0))])));
+      } else {
+        if (m.shared_pending && m.shared_pending.length) {
+          acts.push(h("button", { class: "btn slim primary", type: "button", onclick: press }, tr("Download the shared parts ({0})", [fmtGiB(m.shared_bytes || 0)])));
+        }
+        if (!loc.verified && !m.running) acts.push(h("button", { class: "btn slim ghost", type: "button", disabled: busyOther, onclick: act(() => modelsPost("verify", m.id)) }, tr("Check the files")));
       }
     }
     const item = h("div", {
@@ -403,17 +478,25 @@ function openStrataSheet() {
     if (!show) return;
     if (!sel || !picked) sel = defaultSel();
     const key = JSON.stringify([sel, Spec.v && Spec.v.recommended_r, L.active, L.ram_gib, L.running, L.models.map((m) => [m.id, m.local.complete, m.local.verified, m.local.have_bytes + m.local.partial_bytes > 0,
-      m.download && m.download.state, m.download && m.download.mode, m.download && m.download.error, m.running, m.recommended, m.fits, m.short, m.shared_missing])]);
+      m.download && m.download.state, m.download && m.download.mode, m.download && m.download.error, m.running, m.recommended, m.fits, m.short, m.shared_missing,
+      m.shared_pending, m.shared_bytes]), (L.queue || []).map((q) => [q.id, q.active]),
+    (L.shared || []).map((x) => [x.id, x.local.complete, x.download && x.download.state, x.download && x.download.error])]);
     if (key === shownKey) {
       for (const m of L.models) {
         const p = prog.get(m.id);
         if (p && dlActive(m)) { const [pct, text] = progressText(m.download); p.fill.style.width = `${pct}%`; p.text.textContent = text; }
       }
+      const ps = prog.get("shared");
+      const cur = (L.queue || []).find((q) => q.kind === "shared" && q.active);
+      const sd = cur && (L.shared || []).find((x) => x.id === cur.id);
+      if (ps && sd && sd.download) { const [pct, text] = progressText(sd.download); ps.fill.style.width = `${pct}%`; ps.text.textContent = text; }
       return;
     }
     shownKey = key;
     prog.clear();
-    listBox.replaceChildren(h("div", { class: "set-label muted small" }, tr("Model")), h("div", { class: "msel-group" }, L.models.map(modelItem)));
+    const sharedEl = sharedRow(L, act(() => stopSharedParts()), (fill, text) => prog.set("shared", { fill, text }));   // 11/17 W1
+    listBox.replaceChildren(h("div", { class: "set-label muted small" }, tr("Model")), h("div", { class: "msel-group" }, L.models.map(modelItem)),
+      ...(sharedEl ? [h("div", { class: "msel-group" }, sharedEl)] : []));
     const rec = L.models.find((m) => m.recommended);
     if (rec) {
       const bigger = L.models.filter((m) => !m.fits && (m.experts_gib || 0) > (rec.experts_gib || 0)).map((m) => m.name);
@@ -459,6 +542,8 @@ function openStrataSheet() {
       logBox.classList.add("hidden");
     }
     const online = !!(st && st.online);
+    seatBox.classList.toggle("hidden", !SeatShort.noted());
+    if (SeatShort.noted() && !seatBox.firstChild) seatBox.replaceChildren(h("div", { class: "seat-short-text" }, tr("The GPU memory was not enough to start this model. A lighter model (Sync-XS) is likely to start.")));
     const ram = DSH_CONFIG.strataRamGiB;
     const L = Models.list;
     if (L && L.models) {
@@ -527,6 +612,8 @@ function openStrataSheet() {
         + (same ? "" : tr(" Switching takes 1–2 minutes."))
       : tr("Starting takes 1–2 minutes, and the PC is slow meanwhile.");
     if (m && !m.local.complete) note.textContent += tr(" {0} is not downloaded.", [m.name]);
+    if (m && m.short === "ram" && m.fits_ram_gib) note.textContent += `
+${tr("This model is for {0} GB of RAM. This PC ({1} GB) reads part of it from the SSD, so it is slower.", [m.fits_ram_gib, Math.round(L.ram_gib)])}`;   // 11/17 係 W6
     if (typeof EnvCheck !== "undefined") EnvCheck.strata(state, btn, online && same);   // 11/15 係 C env: not supported -> no start
   }
 
@@ -546,12 +633,13 @@ function openStrataSheet() {
     await loadModels();
     if (closed) return;
     render();
-    const fast = (Models.list && Models.list.active) || strataJobRunning();
+    const fast = (Models.list && (Models.list.active || (Models.list.queue || []).length)) || strataJobRunning();
     timer = setTimeout(poll, fast ? 1000 : 4000);
   }
 
   const off = Store.on((topic) => { if (topic === "strata" || topic === "sessions") render(); });
-  openSheet([h("div", { class: "sheet-title" }, "Strata"), state, note, listBox, why, rBox, btn, btn2, logBox, extra],
+  const memBox = typeof MemView !== "undefined" ? MemView.inline() : null;   // 11/17 係 W5: the memory box (hidden unless the launcher relay answers)
+  openSheet([h("div", { class: "sheet-title" }, "Strata"), seatBox, state, note, memBox, listBox, why, rBox, btn, btn2, logBox, extra],
     { onClose: () => { closed = true; clearTimeout(timer); off(); } });
   render();
   poll();

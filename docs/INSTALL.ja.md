@@ -1,5 +1,3 @@
-<!-- 案（11/15 係 D）: 係 P の利用者向けの説明（pack/src/README.md）の句読点を「、。」にした写し。元が変わったら作り直す。 -->
-
 # Sync-Strata の入れ方・更新・消し方
 
 この文書の 1〜6 は Windows の手順です。Linux は最後の「Linux」の節を読んでください。
@@ -13,7 +11,7 @@ Sync-Strata は、自分の PC の GPU で動くローカルの LLM のアプリ
 | 物 | 条件 |
 |---|---|
 | OS | Windows 10（1803 以降）か Windows 11、64 ビット |
-| GPU | NVIDIA の RTX 30 系か 40 系（対応する GPU の全部は [README](../README.ja.md) の表）。ドライバーは R580 以上（CUDA 13.0 が動く版）。GTX 10 系（CUDA 12 版）は 576.57 以上 |
+| GPU | NVIDIA の RTX 20〜50 系・GTX 10 系・Tesla P100・Tesla V100・Titan V、AMD Radeon の RX 6000・7000・9000 系（単体の GPU。RX 7600M などのノート用も。試験的な機能）。対応する GPU の全部は [README](../README.ja.md) の表。GPU のメモリは 8 GB 以上（12 GB 以上を推奨）。GPU が何枚あっても使うのは 1 枚だけです（対応する GPU のうちメモリが一番多い物）。NVIDIA のドライバーは R580 以上（CUDA 13.0 が動く版）。GTX 10 系・P100・V100・Titan V（CUDA 12 版）は 576.57 以上 |
 | CPU | AVX2 が要ります |
 | RAM | モデルで違います。Sync-XS は 24 GB 以下の PC 向け、Sync-S は 32 GB、Sync-M は 48 GB 以上の PC 向け（アプリが積んでいる RAM の量で選びます） |
 | 空き容量 | アプリ 約 2 GB（更新の間は前の版を 1 つ残すので、その分も）＋どのモデルにも要る共通の部品 約 35 GB ＋ モデル（Sync-XS 約 24 GB・Sync-S 約 28 GB・Sync-M 約 35 GB）。モデルは速い SSD（NVMe）に |
@@ -37,6 +35,17 @@ Sync-Strata は、自分の PC の GPU で動くローカルの LLM のアプリ
 見つからないときや別の場所を使いたいときは `setup.cmd -ModelsDir <モデルのフォルダー>` のように指してください。
 
 ## 3. 更新する
+
+### アプリの画面から
+
+設定（スタートの設定）の **更新** を開きます。
+
+- **更新を確かめる** を押すと、いまの版と新しい版、入れ替わる部品と大きさ、リリースの説明を出します。確かめるだけで、何も落としません。押すまで確かめません。
+- **閉じて更新する** を押して「はい」を選ぶと、Sync-Strata を閉じて更新し、終わると起こし直します。窓（Linux は端末。無ければ `SYNC_HOME/logs/update-<日時>.log`）に様子が出ます。会話とダウンロードは止まります。
+- 閉じて更新できるのは **PC の画面から**だけです。スマホでは確かめるだけです。
+- 置き場に届かないときは、理由と、手で入れる方法（リリースの zip を置くフォルダー）を出します。
+
+### スタートメニューから
 
 スタートメニューの **Sync-Strata の更新**（入れた先の `update.cmd`）をダブルクリック。
 
@@ -74,5 +83,6 @@ Sync-Strata は、自分の PC の GPU で動くローカルの LLM のアプリ
 2. アプリのメニュー（デスクトップにも置きます）の **Sync-Strata** から開きます。
 3. コマンドは `sync.sh`（`./sync.sh up`・`./sync.sh down` など。中身は Windows の `sync` と同じ）。
 4. アプリは `~/.local/share/SyncStrata`、設定と会話（`SYNC_HOME`）は `~/.config/SyncStrata` に入ります。モデルの置き場は `settings.json` の `models_dir` です。
-5. 更新・削除は、アプリのメニューの「Sync-Strata の更新」「Sync-Strata を消す」（`~/.local/share/SyncStrata/update.sh`・`uninstall.sh`）です。前の版に戻す入口は〔要決定〕。
-6. 要る物: 64 ビットの Linux（glibc 2.28 以降。作者の実機は Ubuntu 24.04 で、ほかのディストリビューションは未確認）、NVIDIA のドライバー R580 以上（Linux は 580.95.05 以上。GTX 10 系は 575.57.08 以上）。Radeon は HIP 版で、試験的な機能です（実機では未確認）。
+5. 更新・削除は、アプリのメニューの「Sync-Strata の更新」「Sync-Strata を消す」（`~/.local/share/SyncStrata/update.sh`・`uninstall.sh`）です。前の版に戻すには、アプリのメニューの「Sync-Strata を前の版に戻す」（`~/.local/share/SyncStrata/rollback.sh`）を使います。
+6. 要る物: 64 ビットの Linux（glibc 2.28 以降。作者の実機は Ubuntu 24.04 で、ほかのディストリビューションは未確認）、NVIDIA のドライバー R580 以上（Linux は 580.95.05 以上。GTX 10 系・V100・Titan V は 575.57.08 以上）。Radeon（RX 6000・7000・9000 系の単体の GPU。ノート用も）は HIP 版で、試験的な機能です（実機では未確認）。
+7. 画面の無い PC（SSH でつなぐサーバーなど）は、アプリのメニューの代わりに `./sync.sh up --no-gui` で起こします。窓は開かず、エンジンと dsh だけを起こします。WSL2 と Mac は [README](../README.ja.md) の「対応する GPU」の下の注を読んでください。

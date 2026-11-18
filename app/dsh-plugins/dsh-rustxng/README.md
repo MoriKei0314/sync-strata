@@ -225,7 +225,7 @@ If you would rather not run RustXNG as a service, let the plugin own the process
   config:
     autoStart:
       enabled: true
-      binaryPath: /home/user/.dsh/bin/rustxng   # empty = $DSH_HOME/bin, ~/.local/bin, PATH
+      binaryPath: /home/you/.dsh/bin/rustxng   # empty = $DSH_HOME/bin, ~/.local/bin, PATH
       idleMinutes: 60                          # 0 = keep it until DSH unloads the plugin
 ```
 

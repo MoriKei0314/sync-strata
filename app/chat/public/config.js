@@ -16,7 +16,7 @@ const DSH_CONFIG = Object.freeze({
   // About how much RAM Strata takes when it runs, for the notes on the Strata sheet (GiB; 0 = do not say).
   strataRamGiB: 23,
   // The example in the "add a folder" box (a path on the PC that runs dsh).
-  workspacePathExample: "/home/user/projects/app",
+  workspacePathExample: "/home/me/projects/app",
   // Where the PC's own dsh page listens, as shown in the login help.
   dshLocalUrl: "http://127.0.0.1:3080",
 });

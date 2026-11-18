@@ -7,12 +7,14 @@
 決まり（エンジンの担当の見立て．変えるのは下の表だけ）:
   - NVIDIA（nvidia-smi の compute_cap）: ENGINE_BY_CC の表で engine を決める．
       7.5 以上＝cuda13（7.5＝RTX 20・GTX 16 と 12 以上＝RTX 50 は「動く見込み・未確認」の注意．TURING は 1 か所で断るに戻せる），
-      6.x＝cuda12（GTX 10．試験的）．それ以外は対応外．ドライバーの下限は engine ごと（DRIVER_MIN）．
+      6.0〜7.4＝cuda12（Tesla P100・GTX 10・V100・Titan V．試験的．P100 は 11/18 に入れた）．それ以外は対応外．
+      P100 を入れるとき（CUDA 12 のキットに sm_60 が入ったら）: ENGINE_BY_CC の (6.1, 7.5, ...) を (6.0, 7.5, ...) に，setup.sh の NV_TABLE の 6.1 7.5 を 6.0 7.5 に（gpu_p100 の断りは cc 6.0 が表に無いときだけ出るので残してよい）．ドライバーの下限は engine ごと（DRIVER_MIN）．
   - NVIDIA が無いとき Radeon（表示アダプターの名前．レジストリの表示アダプターの欄＝管理者なしで読める）: RADEON の表で
       RX 9000＝hip-rx9070，RX 7000＝hip-rdna3，RX 6000＝hip-rdna2（どれも試験的）．古い世代は対応外．
     内蔵の Radeon は対応外（Windows は 11/16 に決定．HIP の decode の最初で GPU が落ちる．Strix Halo＝Radeon 8060S などだけ Windows・Linux とも対応）．
     単体の Radeon と内蔵の両方がある PC は単体を使う（HIP の装置の番号は strata-device --list-devices で選ぶ＝hip_ordinal）．
-    NVIDIA と Radeon の両方があるときは NVIDIA．
+    NVIDIA と Radeon の両方があるときは対応する NVIDIA（11/18 W8: NVIDIA が全部対応外のときだけ Radeon を見る）．
+    GPU が複数のときは，対応する物の中で，試験的でない物を先に，その中で VRAM の大きい物（同じなら新しい世代）を 1 枚使う（このアプリは VRAM が大きいほど席が増えて速い）．
   - CPU に AVX2 が無い → 止める．AVX-512 が無いのは対応（doctor に 1 行）．
   - VRAM・RAM が推奨より少ない → 止めずに注意．
 出すのは鍵と値（文は画面の側で訳す．CLI と setup は下の TEXTS）．結果の engine＝入れる・使うエンジンの部品（engine-<engine>）．
@@ -33,8 +35,8 @@ ENGINE_BY_CC = [
     (8.6, 12.0, "cuda13", "ok"),            # RTX 30・40
     (8.0, 8.6, "cuda13", "untested"),       # A100・A30 など（11/16: キットに PTX sm_75・86 があり JIT で動く見込み．未確認）
     (7.5, 7.6, "cuda13", "turing"),         # RTX 20・GTX 16（TURING で切り替え）
-    (6.0, 7.0, "cuda12", "experimental"),   # GTX 10
-]
+    (6.0, 7.5, "cuda12", "experimental"),   # Tesla P100（6.0．11/18 本人の決定で試し．実機での生成は未確認）・GTX 10（6.1）・V100・Titan V（7.0）．11/18 W8: Volta を足した（本家 NVIDIA_V100.md．CUDA 12 のエンジン）
+]                                           # 6.0（Tesla P100）は入れない＝対応外（CUDA 12 のキットは sm_61 と sm_70 だけで，sm_60 のコードは無い見込み．未確認）
 # ドライバーの下限（版は「.」で分けて数で比べる．足りない部分は 0）．Linux は係 L の setup.sh の DRIVER_MIN と同じ（11/16 エンジン 3 の答え）．
 DRIVER_MIN_WIN = {"cuda13": "580", "cuda12": "576.57"}   # 11/16: cu12 のキットは toolkit 12.9.1 で組む（その toolkit driver が Windows 576.57．GTX 10 は R580 まで対応）
 DRIVER_MIN_LINUX = {"cuda13": "580.95.05", "cuda12": "575.57.08"}
@@ -51,9 +53,9 @@ def driver_ok(have, need):
     return a + (0,) * (n - len(a)) >= b + (0,) * (n - len(b))
 # Radeon の名前 → engine（上から順に見る．内蔵の「Radeon(TM) Graphics」などはどれにも当たらない＝対応外）
 RADEON = [
-    (r"\bRX\s*9\d{3}\b", "hip-rx9070"),
-    (r"\bRX\s*7\d{3}\b", "hip-rdna3"),
-    (r"\bRX\s*6\d{3}\b", "hip-rdna2"),
+    (r"\bRX\s*9\d{3}[MS]?\b", "hip-rx9070"),     # 11/18 W8: ノート用の M・S 付き（RX 7600M・RX 6700S・RX 7600M XT）も
+    (r"\bRX\s*7\d{3}[MS]?\b", "hip-rdna3"),
+    (r"\bRX\s*6\d{3}[MS]?\b", "hip-rdna2"),
 ]
 # Radeon の device ID の範囲 → engine（名前より先に見る．古い pci.ids の PC で名前が出なくても見分けられる）．
 # 係 L の setup.sh の RADEON_IDS・AMD_IGPU_IDS と同じ表（s2/check_gpu_tables.py が食い違いを見る）
@@ -83,6 +85,9 @@ TEXTS = {   # 鍵 → (英語, 日本語, 中国語)．{gpu} などは値で埋�
     "gpu_too_old": ("This GPU ({gpu}) is not supported. An NVIDIA GTX 10 series or newer, or a Radeon RX 6000 series or newer is needed.",
                     "この GPU（{gpu}）には対応していません。NVIDIA の GTX 10 シリーズ以降か、Radeon の RX 6000 シリーズ以降が必要です。",
                     "不支持此显卡（{gpu}）。需要 NVIDIA GTX 10 系列或更新，或 Radeon RX 6000 系列或更新。"),
+    "gpu_p100": ("This GPU ({gpu}) is not supported. The CUDA 12 engine has no code for the Tesla P100 (compute capability 6.0).",
+                 "この GPU（{gpu}）には対応していません。CUDA 12 版のエンジンに Tesla P100（compute capability 6.0）向けのコードが入っていません。",
+                 "不支持此显卡（{gpu}）。CUDA 12 版引擎不含面向 Tesla P100（compute capability 6.0）的代码。"),
     "igpu_only": ("Built-in graphics ({gpu}) are not supported. A separate NVIDIA or Radeon graphics card is needed.",
                   "内蔵の GPU（{gpu}）には対応していません。NVIDIA か Radeon のグラフィックボードが必要です。",
                   "不支持集成显卡（{gpu}）。需要 NVIDIA 或 Radeon 独立显卡。"),
@@ -101,6 +106,9 @@ TEXTS = {   # 鍵 → (英語, 日本語, 中国語)．{gpu} などは値で埋�
     "gpu_experimental": ("Support for this GPU ({gpu}) is experimental. It has not been tested on a real PC.",
                          "この GPU（{gpu}）への対応は試験的な機能です。実機では確認していません。",
                          "对此显卡（{gpu}）的支持是实验性功能，尚未在实机上验证。"),
+    "vram_too_small": ("The GPU has only {vram_gib} GB of memory, which is not enough to run the engine. A GPU with {need} GB or more is needed.",
+                       "GPU のメモリが {vram_gib} GB しかなく、エンジンを動かせません。{need} GB 以上の GPU が必要です。",
+                       "显卡显存只有 {vram_gib} GB，无法运行引擎。需要 {need} GB 以上的显卡。"),
     "vram_low": ("The GPU has only {vram_gib} GB of memory, so it may be slow (12 GB or more is recommended).",
                  "GPU のメモリが {vram_gib} GB と少ないため、遅くなることがあります（12 GB 以上を推奨）。",
                  "显卡显存只有 {vram_gib} GB，可能较慢（建议 12 GB 以上）。"),
@@ -131,13 +139,13 @@ def _nvidia():
     except (OSError, subprocess.TimeoutExpired):
         return []
     gpus = []
-    for l in o.stdout.strip().splitlines():
+    for i, l in enumerate(o.stdout.strip().splitlines()):     # 11/18: i は nvidia-smi の番号（GPU が複数のとき，選んだ GPU でエンジンを起こすため）
         p = [x.strip() for x in l.split(",")]
         if len(p) < 4:
             continue
         try:
             gpus.append({"name": p[0], "cc": float(p[1]), "driver": p[2],
-                         "vram_gib": round(float(p[3]) / 1024, 1)})
+                         "vram_gib": round(float(p[3]) / 1024, 1), "index": i})
         except ValueError:
             continue
     return gpus
@@ -258,9 +266,16 @@ def probe():
         ov = json.loads(os.environ.get("SYNC_ENV_OVERRIDE") or "{}")
     except ValueError:
         ov = {}
+    if "ram_gib" not in ov:      # 11/17 G（項目 3）: 「32 GB」の PC は見える量が 30.9 GiB などになる．少ないかの判定は積んでいる量で（取れなければ見える量）
+        try:
+            inst = OS.installed_mem_gib()
+            if inst:
+                facts["ram_installed_gib"] = inst
+        except Exception:
+            pass
     facts.update(ov)
     if "adapters" not in facts:
-        facts["adapters"] = [] if facts["gpus"] else _adapters()     # Radeon を見るのは NVIDIA が無いときだけ
+        facts["adapters"] = _adapters()     # 11/18 W8: NVIDIA があっても Radeon を調べる（NVIDIA が全部対応外のとき Radeon を使うため．pick_gpu は対応する NVIDIA を先に選ぶ）
     _cache = facts
     return facts
 
@@ -297,22 +312,26 @@ def amd_class(a, win):
     return None, "too_old", False                # 番号でも名前でも型が分からない AMD は一覧に出すが対応外
 
 
-def pick_gpu(f):
-    """使う GPU と engine．返り値 (gpu の辞書, engine か None, 種類 ok|untested|turing|experimental|too_old|igpu|none)"""
-    gpus = f.get("gpus") or []
-    if gpus:
-        def rank(g):
-            cc = float(g.get("cc", 0))
-            return (any(lo <= cc < hi for lo, hi, _, _ in ENGINE_BY_CC), cc, g.get("vram_gib", 0))
-        g = max(gpus, key=rank)
+def _pick_nvidia(gpus):
+    """NVIDIA の中で使う 1 枚．対応するか → 試験的でない物を先に → VRAM → 世代 cc の順（11/18 W8: 前は世代が先．このアプリは VRAM が大きいほど速い．
+    試験的（GTX 10・V100 など）は，試験的でない物（RTX 20 以降）があればそちらを先に．試験的な物しか無ければ VRAM → cc）"""
+    def rank(g):
         cc = float(g.get("cc", 0))
-        for lo, hi, eng, kind in ENGINE_BY_CC:
-            if lo <= cc < hi:
-                return dict(g, vendor="nvidia"), eng, kind
-        return dict(g, vendor="nvidia"), None, "too_old"
+        kinds = [k for lo, hi, _, k in ENGINE_BY_CC if lo <= cc < hi]
+        return (bool(kinds), bool(kinds) and kinds[0] != "experimental", float(g.get("vram_gib") or 0), cc)
+    g = max(gpus, key=rank)
+    cc = float(g.get("cc", 0))
+    for lo, hi, eng, kind in ENGINE_BY_CC:
+        if lo <= cc < hi:
+            return dict(g, vendor="nvidia"), eng, kind
+    return dict(g, vendor="nvidia"), None, "too_old"
+
+
+def _pick_radeon(f):
+    """Radeon の中で使う 1 枚（Radeon が無ければ None）"""
     ads = [a for a in f.get("adapters") or [] if a.get("vendor_id") == "0x1002" or re.search(r"radeon|\bamd\b", a.get("name", ""), re.I)]
     if not ads:
-        return None, None, "none"
+        return None
     # 11/16 係 S3: 装置ごとに見分けて，対応する物があればその中で単体（内蔵でない物）を先に，次に VRAM の大きい物．
     # 対応する物が無ければ，内蔵（対応外の理由は igpu_only）→ 分からない AMD（gpu_too_old）の順．前は内蔵が先に並ぶと単体を見ずに断っていた
     win = f.get("os", "windows" if os.name == "nt" else "linux") == "windows"
@@ -326,6 +345,20 @@ def pick_gpu(f):
             if kind == want:
                 return dict(a, vendor="amd", integrated=integrated), None, kind
     return dict(ads[0], vendor="amd"), None, "too_old"
+
+
+def pick_gpu(f):
+    """使う GPU と engine．返り値 (gpu の辞書, engine か None, 種類 ok|untested|turing|experimental|too_old|igpu|none)．
+    11/18 W8: 対応する NVIDIA があればそれ（VRAM の大きい物）．NVIDIA が全部対応外のときは，対応する Radeon があればそれ．
+    どちらも無ければ NVIDIA の断り（NVIDIA が無ければ Radeon の断り）"""
+    gpus = f.get("gpus") or []
+    nv = _pick_nvidia(gpus) if gpus else None
+    if nv and nv[1]:
+        return nv
+    rd = _pick_radeon(f)
+    if rd and rd[1]:
+        return rd
+    return nv or rd or (None, None, "none")
 
 
 def parse_hip_devices(text):
@@ -379,6 +412,11 @@ def hip_ordinal(engine_exe, lib_dirs=None):
     return pick_hip_ordinal(parse_hip_devices(r.stdout)) if r.returncode == 0 else None
 
 
+def _min_vram_gib():
+    import wintune      # 固定の VRAM・席の大きさ・最小の席の数は wintune の値（約 7.04）
+    return wintune.min_vram_gib()
+
+
 def check(facts=None):
     f = facts or probe()
     blockers, warnings = [], []
@@ -388,6 +426,8 @@ def check(facts=None):
         blockers.append({"key": "no_gpu"})
     elif kind == "igpu":
         blockers.append({"key": "igpu_only", "gpu": name})
+    elif kind == "too_old" and (g or {}).get("vendor") == "nvidia" and 6.0 <= float(g.get("cc") or 0) < 6.1:
+        blockers.append({"key": "gpu_p100", "gpu": name})      # 11/18 W8: Tesla P100（cc 6.0）は理由つきで断る
     elif kind == "too_old":
         blockers.append({"key": "gpu_too_old", "gpu": name})
     elif kind == "turing":
@@ -404,11 +444,13 @@ def check(facts=None):
     if g and eng:
         if g.get("vram_gib") is None:
             warnings.append({"key": "vram_unknown"})
+        elif float(g["vram_gib"]) < _min_vram_gib():      # 11/18 W7: 席が最小の数に届かない VRAM は，起動を試す前に止める
+            blockers.append({"key": "vram_too_small", "vram_gib": g.get("vram_gib"), "need": int(-(-_min_vram_gib() // 1))})
         elif float(g["vram_gib"]) + 0.5 < VRAM_WARN_GIB:
             warnings.append({"key": "vram_low", "vram_gib": g.get("vram_gib")})
     if not f.get("avx2", True):
         blockers.append({"key": "no_avx2"})
-    if float(f.get("ram_gib") or 0) + 1 < RAM_WARN_GIB:
+    if float(f.get("ram_installed_gib") or (float(f.get("ram_gib") or 0) + 1)) < RAM_WARN_GIB:   # 11/17: 積んでいる量（無ければ見える量 + 1）
         warnings.append({"key": "ram_low", "ram_gib": f.get("ram_gib")})
     notes = [] if f.get("avx512", True) else [{"key": "no_avx512"}]
     return {"ok": not blockers, "blockers": blockers, "warnings": warnings, "notes": notes,

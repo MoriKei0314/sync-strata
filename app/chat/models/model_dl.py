@@ -242,10 +242,11 @@ def explain(e):
     """huggingface_hub の誤りを，画面に出す 1 行に（鍵の中身は出さない）"""
     name = type(e).__name__
     text = str(e).splitlines()[0][:200] if str(e) else name
-    if A.hf_home and (name in ("RepositoryNotFoundError", "GatedRepoError") or " 401 " in f" {text} " or "401 Client Error" in text):   # 11/15 係 C
-        S["error_kind"] = "auth"
-        return "非公開の置き場です。Hugging Face のトークンを入れてから、もう一度ダウンロードしてください"
-    if name in ("RepositoryNotFoundError", "GatedRepoError") or " 401 " in f" {text} " or "401 Client Error" in text:
+    auth = name in ("RepositoryNotFoundError", "GatedRepoError") or " 401 " in f" {text} " or "401 Client Error" in text         or " 403 " in f" {text} " or "403 Client Error" in text   # 11/17 W1: 403 も（トークンが足りない・権限が無い）
+    if A.hf_home and auth:   # 11/15 係 C
+        S["error_kind"] = "auth"   # 11/17 W1: 画面にトークンの欄は無い．端末で入れる（model_dl.py token set --hf-home <SYNC_HOME>/hf）．画面は自分の言葉で言う
+        return "非公開の置き場です。トークンを端末で入れてください。"
+    if auth:
         return "Hugging Face の置き場を開けませんでした（非公開の置き場です。この PC で hf auth login をしてから再開してください）"
     if name == "RevisionNotFoundError":
         return "置き場に一覧の版（revision）がありません．一覧（models.json）を新しくしてください"

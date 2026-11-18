@@ -1,5 +1,3 @@
-<!-- 案（11/15 係 D）．<account> は新しいアカウントの名前に置き換える．〔要決定〕〔測定中〕の印は公開前に消す． -->
-
 # Sync-Strata
 
 [English](README.md) | 日本語
@@ -16,9 +14,9 @@ Sync-Strata は、Qwen3.8-Flash-Next（125B の MoE）を家庭の PC 1 台で�
 |---|---|
 | OS | Windows 11、Windows 10（1803 以降）、または 64 ビットの Linux（glibc 2.28 以降。Ubuntu 20.04・Debian 10・RHEL 8 以降など。作者の実機は Ubuntu 24.04 で、ほかのディストリビューションは未確認） |
 | GPU | 下の「対応する GPU」の表 |
-| NVIDIA のドライバー | R580 以上（CUDA 13。Linux は 580.95.05 以上）。GTX 10 系（CUDA 12 版）は Windows 576.57 以上・Linux 575.57.08 以上 |
+| NVIDIA のドライバー | R580 以上（CUDA 13。Linux は 580.95.05 以上）。GTX 10 系・V100・Titan V（CUDA 12 版）は Windows 576.57 以上・Linux 575.57.08 以上 |
 | CPU | AVX2 が要ります。AVX-512 が無い CPU でも動きますが、会話の速さが 1 割ほど落ちます（作者の PC で AVX-512 を使わずに測った値） |
-| RAM・VRAM | 〔要決定: 下限〕（モデルの選び方は下の表） |
+| RAM・VRAM | 積んでいる RAM に合うモデルは、下の「モデルの選び方」の表を見てください（最低限の量は測定予定） |
 | 空き容量 | アプリ 約 2 GB ＋ どのモデルにも要る共通の部品 約 35 GB ＋ モデル（Sync-XS 約 24 GB・Sync-S 約 28 GB・Sync-M 約 35 GB）。モデルは NVMe の SSD に置くことを勧めます |
 | 管理者の権限・Python・Node | 要りません（アプリの中に入っています） |
 
@@ -29,11 +27,20 @@ setup が PC の GPU を調べて、合うエンジンだけを落とします�
 | GPU | 状態 |
 |---|---|
 | NVIDIA RTX 30 系・40 系 | 対応 |
-| NVIDIA RTX 20 系・GTX 16 系・RTX 50 系、A100 などのデータセンター向け（Ampere） | 動く見込み（実機では未確認） |
-| NVIDIA GTX 10 系（CUDA 12 版のエンジン） | 試験的な機能（実機では未確認） |
-| AMD Radeon RX 6000・7000・9000 系（HIP 版のエンジン） | 試験的な機能（実機では未確認） |
+| NVIDIA RTX 20 系・GTX 16 系・RTX 50 系 | 動く見込み（実機では未確認） |
+| NVIDIA GTX 10 系・Tesla P100・Tesla V100・Titan V（CUDA 12 版のエンジン） | 試験的な機能（実機では未確認） |
+| AMD Radeon RX 6000・7000・9000 系の単体の GPU（RX 7600M・RX 6700S などのノート用も。HIP 版のエンジン）。Windows・Linux とも | 試験的な機能（実機では未確認） |
 | AMD Ryzen AI Max の内蔵 Radeon（Strix Halo。8060S・8050S・8040S）。Windows・Linux とも | 試験的な機能（実機では未確認） |
-| 上のほかの内蔵 GPU・Intel の GPU | 非対応（Windows の内蔵 Radeon は、文章の生成の最初で GPU が止まります。Linux でも、Strix Halo のほかの内蔵 Radeon は対応外です） |
+| A100 などのデータセンター向けの NVIDIA の GPU（Ampere） | 未確認（エンジンが起動しないことがあります） |
+| 上のほかの内蔵 GPU・Intel の GPU（Intel Arc・内蔵） | 非対応（Windows の内蔵 Radeon は、文章の生成の最初で GPU が止まります。Linux でも、Strix Halo のほかの内蔵 Radeon は対応外です） |
+| NVIDIA の Maxwell 以前（GTX 900 系以前） | 非対応 |
+| メモリが 8 GB 未満の GPU | 非対応（エンジンが起動できないので、アプリが理由を出して止まります） |
+| GPU が無い PC、AVX2 が無い CPU | 非対応 |
+
+- GPU が何枚あっても、使うのは 1 枚だけです。対応する GPU のうち、メモリが一番多い物（同じなら新しい世代）を選びます（GPU のメモリが多いほど速いためです）。対応する NVIDIA の GPU を先に選び、NVIDIA が全部対応外のときは、対応する Radeon を使います。
+- Mac には対応していません。
+- WSL2（Windows の中の Linux）: 作者は NVIDIA の GPU で、Linux 版のエンジンを組んで確かめるのに使いました。アプリをその中で動かすことは確かめていません。
+- 画面の無い PC（SSH でつなぐサーバーなど）は、`sync up --no-gui`（Linux は `./sync.sh up --no-gui`）で起こします。窓は開かず、エンジンと dsh だけを起こします。
 
 ## 入れ方
 
@@ -55,7 +62,7 @@ setup が PC の GPU を調べて、合うエンジンだけを落とします�
 
 - **GUI**: デスクトップのアイコンから。窓を閉じるときに「GUI だけ閉じる／GUI と dsh を閉じる／全部閉じる」を選べます。GUI だけ閉じても、エンジンと dsh は動き続けます。
 - **スマホ**: PC の画面の設定で「スマホからの接続」を「同じ Wi-Fi」にし、出てきた QR を同じ Wi-Fi のスマホで読み取ります。外出先からは [Tailscale](https://tailscale.com/) を使います。QR は 3 分・1 回きりの合い言葉で、長く使える鍵は PC の外に出ません。スマホのログインは QR を読んだ日から 30 日で切れ、残りが 7 日以内になるとスマホの画面と PC の「接続中の端末」に警告が出ます。端末は PC の「接続中の端末」から取り消せます。同じ Wi-Fi の中では通信は暗号化されません（[docs/REMOTE.ja.md](docs/REMOTE.ja.md)）。
-- **CLI**: 入れた先の `sync`（Linux では `sync.sh`）から。
+- **CLI**: 入れた先の `sync`（Linux では `./sync.sh`）から。全部のコマンドと引数は [docs/CLI.ja.md](docs/CLI.ja.md) にあります。
   ```
   sync up              # エンジンと dsh を起こす（窓は開かない）
   sync up --api-only   # API だけ
@@ -63,7 +70,7 @@ setup が PC の GPU を調べて、合うエンジンだけを落とします�
   sync chat            # 端末で会話する
   sync down            # 全部止める
   ```
-- **API**: `http://127.0.0.1:8080/v1`（OpenAI 互換の `/v1/chat/completions`・`/v1/responses`・`/v1/models`、Anthropic 互換の `/v1/messages`）。モデル名とつなぎ方の例は `sync api` で表示されます。ほかの PC からつなぐときは鍵が要ります（[docs/API.ja.md](docs/API.ja.md)）。
+- **API**: `http://127.0.0.1:8080/v1`（8080 は既定の番号です。ほかのプログラムが使っていると空いている番号に替わるので、実際の番号は `sync api` で分かります。OpenAI 互換の `/v1/chat/completions`・`/v1/responses`・`/v1/models`、Anthropic 互換の `/v1/messages`）。モデル名とつなぎ方の例は `sync api` で表示されます。ほかの PC からつなぐときは鍵が要ります（[docs/API.ja.md](docs/API.ja.md)）。
 
 ## モデルの選び方
 
@@ -94,7 +101,6 @@ setup が PC の GPU を調べて、合うエンジンだけを落とします�
 | 12 GB 以上 | 256K | k8v4 |
 | 10〜11 GB | 128K | k8v4 |
 | 8〜9 GB | 64K | k4 |
-| 6 GB | 〔測定中〕 | 〔測定中〕 |
 
 dsh の会話の要約は、文脈が 262,144 のとき 188,416 トークンから始まります（文脈の 9 割と、「文脈 － 返事の上限 65,536 － 余白 8,192」の小さい方）。この値は設定に合わせて起動のたびに決まり、会話の画面の「要約が始まる長さ」にも同じ値が出ます。
 
@@ -115,51 +121,40 @@ GUI では「起動の設定」→「コンテキスト設定」で選べ、「�
 
 ## 測り
 
-下の表は作者の PC で測った値です。〔最後のエンジンで測り直す。いまの値は 11/15〜16 の rel-1115 の版〕
+下の表は作者の PC で測った値です。下の値は 0.1.0 の版で測りました。
 
-- PC: Ryzen 7 7800X3D・RAM 32 GB（DDR5）・RTX 3080 12 GB（画面も同じ GPU）・NVMe SSD。OS は Windows 11 と Linux（Ubuntu 24.04）の両方
+- PC: Ryzen 7 7800X3D・RAM 32 GB（DDR5）・RTX 3080 12 GB（画面も同じ GPU）・NVMe SSD。OS は Windows 11 と Linux（Ubuntu 24.04）の両方（Linux の値は測定予定です）
 - エンジン: Sync-Strata 0.1.0（Gyro-S・Gyro-M は本家 Strata 0.2.13.1）
 - **jbench**: 本家 Strata の速さの物差し（tok/s）。decode は決まった 10 本の頼み（英語と日本語の文・コード・JSON・写し × 温度 0 と 0.7）の幾何平均、prefill は約 1,000 トークンの頼みを読む速さです。思考は切り、seed を変えた 3 回の中央の値です。
 - **dsh の会話**: dsh を通した日本語の会話（思考は low・温度は既定）の平均 tok/s（トークンの合計 ÷ 時間の合計）。雑談 6 会話（1 会話 3〜4 ターン、返事は約 18 本）を seed を変えて 2〜3 回流した値です。dsh の指示文と道具の説明（約 5,600 トークン）が毎回前に付きます。
 
 | OS | モデル | tail skip | jbench decode | jbench prefill | dsh の会話 |
 |---|---|---|---:|---:|---:|
-| Windows | Sync-XS | R4 | 〔測定中〕 | | |
-| Windows | Sync-XS | R7 | 〔測定中〕 | | |
-| Windows | Sync-XS | R10 | 〔測定中〕 | | |
+| Windows | Sync-XS | R4・R7・R10 | 測定予定 | 測定予定 | 測定予定 |
 | Windows | Sync-S | R4 | 144.0 | 597 | 104.1 |
 | Windows | Sync-S | R7 | 127.5 | 648 | 90.7 |
 | Windows | Sync-S | R10 | 104.6 | 593 | 80.1 |
 | Windows | Sync-M | R4 | 124.6 | 316 | 92.2 |
 | Windows | Sync-M | R7 | 93.6 | 322 | 75.7 |
 | Windows | Sync-M | R10 | 69.1 | 322 | 59.1 |
-| Windows | Gyro-S（本家・既定） | 7 | 72.6 | 241 | 〔測定中〕 |
-| Windows | Gyro-S（本家・最速の設定） | | | | |
-| Windows | Gyro-M（本家・既定） | 7 | 43.2 | 93 | 〔測定中〕 |
-| Windows | Gyro-M（本家・最速の設定） | 4 | 67.8 | 102 | 〔測定中〕 |
-| Linux | Sync-S | R4 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Sync-S | R7 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Sync-S | R10 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Sync-M | R4 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Sync-M | R7 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Sync-M | R10 | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Gyro-S（本家・既定） | | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Gyro-S（本家・最速の設定） | | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Gyro-M（本家・既定） | | 測定予定 | 測定予定 | 測定予定 |
-| Linux | Gyro-M（本家・最速の設定） | | 測定予定 | 測定予定 | 測定予定 |
-| ― | GTX 10 系（CUDA 12 版） | ― | 実機なし。測れていない | | |
+| Windows | Gyro-S（本家・既定） | 7 | 72.6 | 241 | 測定予定 |
+| Windows | Gyro-S（本家・最速の設定） | | 測定予定 | 測定予定 | 測定予定 |
+| Windows | Gyro-M（本家・既定） | 7 | 43.2 | 93 | 測定予定 |
+| Windows | Gyro-M（本家・最速の設定） | 4 | 67.8 | 102 | 測定予定 |
+| ― | GTX 10 系・V100・Titan V（CUDA 12 版） | ― | 実機なし。測れていない | | |
 | ― | Radeon RX 6000・7000・9000 系（HIP 版） | ― | 実機なし。測れていない | | |
+
+Linux（Sync-S・Sync-M・本家の Gyro）の値は測定予定です。
 
 品質（元のモデルとの差）は各モデルのページに載せます。Sync-XS の品質は、Colab の本番 eval_v4 で測りました。元の Sync-XS（表引きの形）と同等で（物差し B で +0.60%、95% の幅は −0.23〜+1.34%）、Gyro-S より 16.1% 良く、Sync-S より 34.8% 悪い値です（物差し B の KL の比。表は [Sync-XS のページ](https://huggingface.co/hiru2005/Sync-XS)）。速さは PC（とくに RAM の量・SSD・裏で動くアプリ）で大きく変わります。
 
 ## 制限と既知の問題
 
-- 対応を確かめた GPU は NVIDIA の RTX 30・40 系だけです。RTX 20・GTX 16・RTX 50 系、GTX 10 系、Radeon は実機で確かめていません（上の表）。Mac・Intel の GPU・内蔵 GPU には対応していません（Ryzen AI Max の内蔵 Radeon〔Strix Halo。8060S など〕だけは Windows・Linux とも試験的に対応します）。Windows の内蔵 Radeon は、文章の生成の最初で GPU が止まります。単体の Radeon と内蔵 Radeon の両方がある PC では、単体の Radeon を使います。
+- 対応を確かめた GPU は NVIDIA の RTX 30・40 系だけです。RTX 20・GTX 16・RTX 50 系、GTX 10 系、V100・Titan V、Radeon は実機で確かめていません（上の表）。Mac・Intel の GPU・内蔵 GPU には対応していません（Ryzen AI Max の内蔵 Radeon〔Strix Halo。8060S など〕だけは Windows・Linux とも試験的に対応します）。Windows の内蔵 Radeon は、文章の生成の最初で GPU が止まります。単体の Radeon と内蔵 Radeon の両方がある PC では、単体の Radeon を使います。
 - 画像は CPU で読むため、1 枚に十数秒かかります（どの配布物にも画像の読み取りが入っています）。
 - ほかのアプリが GPU やメモリ帯域を多く使うと、速さが大きく落ちます（CPU の取り合いには自動で対処します）。`sync doctor` で、いま使っているアプリが分かります。
 - 画面を描く GPU と同じ GPU で動かすと、使える VRAM が減ります。
 - 量子化の較正に使った文章の一部は、作者自身の会話の記録から作りました（下の「較正について」）。
-- 〔要決定: 公開時点で残る問題を足す〕
 
 ## 較正について
 

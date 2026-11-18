@@ -29,7 +29,7 @@ NV_TABLE='12.0 99.0 cuda13 untested
 8.6 12.0 cuda13 ok
 8.0 8.6 cuda13 untested
 7.5 7.6 cuda13 turing
-6.0 7.0 cuda12 experimental'
+6.0 7.5 cuda12 experimental'   # 11/18 W8: V100・Titan V（7.0）を足した．11/18 夕: P100（6.0）も試しで入れた
 TURING=warn            # RTX 20・GTX 16（7.5）: warn＝動く見込みとして通す／block＝断る
 # NVIDIA のドライバーの下限（Linux．11/16 エンジン 3）: driver_version を「.」で分けて数で比べる（575.51.03 ＜ 575.57.08）
 DRIVER_MIN='cuda13 580.95.05
@@ -47,13 +47,13 @@ RADEON_IDS='0x7550 0x755f hip-rx9070 RX-9070系-Navi48-gfx1201
 0x7420 0x743f hip-rdna2 RX-6500・6400系-Navi24-gfx1034
 0x1586 0x1586 hip-rdna3 Ryzen-AI-Max-Strix-Halo-gfx1151'
 # 名前（ID が表に無いとき．sync_env.py の RADEON と同じ見方．小文字にして照らす）: エンジン 拡張正規表現
-RADEON_NAMES='hip-rx9070 rx.?9[0-9][0-9][0-9]
-hip-rdna3 rx.?7[0-9][0-9][0-9]
-hip-rdna2 rx.?6[0-9][0-9][0-9]
+RADEON_NAMES='hip-rx9070 rx.?9[0-9][0-9][0-9]m?s?([^a-z0-9]|$)
+hip-rdna3 rx.?7[0-9][0-9][0-9]m?s?([^a-z0-9]|$)
+hip-rdna2 rx.?6[0-9][0-9][0-9]m?s?([^a-z0-9]|$)
 hip-rdna3 radeon *(\(tm\))? *80[456]0s'
 # 内蔵の Radeon（対応外の理由を「内蔵」にする）: device ID と名前
 AMD_IGPU_IDS='0x15d8 0x15dd 0x1636 0x1638 0x164c 0x15e7 0x1681 0x164e 0x15bf 0x15c8 0x150e 0x1506 0x163f 0x13c0'
-IGPU_NAME_RE='radeon *\(tm\) *graphics|radeon graphics|vega [0-9]+ graphics'
+IGPU_NAME_RE='radeon *\(tm\) *graphics|radeon graphics|vega [0-9]+ graphics|radeon *(\(tm\))? *[0-9][0-9][0-9]m([^a-z]|$)'
 VRAM_WARN_GIB=12       # これ未満は注意（sync_env.py と同じ）
 RAM_WARN_GIB=32
 GLIBC_MIN=2.28         # エンジンのキット・Node 24 の下限
@@ -150,6 +150,7 @@ tx() {
     env_app_only) E='The app was installed, but no engine was installed.'; J='アプリは入れましたが、エンジンは入れていません。' ;;
     env_no_gpu) E='No supported GPU was found. An NVIDIA GTX 10 series or newer, or an AMD Radeon RX 6000 series or newer is needed.'; J='対応する GPU が見つかりません。NVIDIA の GTX 10 シリーズ以降か、Radeon の RX 6000 シリーズ以降が必要です。' ;;
     env_gpu_too_old) E='This GPU (%s) is not supported. An NVIDIA GTX 10 series or newer, or a Radeon RX 6000 series or newer is needed.'; J='この GPU（%s）には対応していません。NVIDIA の GTX 10 シリーズ以降か、Radeon の RX 6000 シリーズ以降が必要です。' ;;
+    env_gpu_p100) E='This GPU (%s) is not supported. The CUDA 12 engine has no code for the Tesla P100 (compute capability 6.0).'; J='この GPU（%s）には対応していません。CUDA 12 版のエンジンに Tesla P100（compute capability 6.0）向けのコードが入っていません。' ;;
     env_igpu_only) E='Built-in graphics (%s) are not supported. A separate NVIDIA or Radeon graphics card is needed.'; J='内蔵の GPU（%s）には対応していません。NVIDIA か Radeon のグラフィックボードが必要です。' ;;
     env_gpu_turing_pending) E='Support for the RTX 20 series (%s) is still being checked.'; J='RTX 20 シリーズ（%s）への対応は確認中です。' ;;
     env_driver_old) E='Please update the NVIDIA driver (now %s; %s or later is needed).'; J='NVIDIA のドライバーを更新してください（今は %s、%s 以降が必要です）。' ;;
@@ -488,15 +489,26 @@ END { for (j = 0; j < cnt; j++) print j US v[j, "id"] US v[j, "version"] US v[j,
 open_feed() { # 置き場（フォルダー・manifest.json・URL）→ FEED_URL FEED_BASE FEED_FLAT COMPS REL UPDATE_FEED
   local src="$1" mp
   FEED_FLAT=$TMPD/manifest.flat; COMPS=$TMPD/comps.tsv
+  # 11/17 H: 一覧の名前は OS ごと（manifest-linux-x64.json．GitHub のリリースは平らな置き場で Windows の一覧とぶつかるため）．
+  # 無ければ 0.1.0-1115 までの manifest.json（別の OS の一覧なら下の platform の確かめで断る）
   if is_url "$src"; then
     FEED_URL=1
-    case $src in *.json) mp=$src ;; *) mp=${src%/}/manifest.json ;; esac
+    case $src in
+      *.json) mp=$src; fetch "$mp" "$TMPD/manifest.json" || die "$(t err_download "$mp")" ;;
+      *) mp=
+         for n in manifest-linux-x64.json manifest.json; do
+           if fetch "${src%/}/$n" "$TMPD/manifest.json"; then mp=${src%/}/$n; break; fi
+         done
+         [ -n "$mp" ] || die "$(t err_download "${src%/}/manifest-linux-x64.json")" ;;
+    esac
     FEED_BASE=${mp%/*}/
-    fetch "$mp" "$TMPD/manifest.json" || die "$(t err_download "$mp")"
     mp=$TMPD/manifest.json
   else
     FEED_URL=0
-    case $src in *.json) mp=$src ;; *) mp=${src%/}/manifest.json ;; esac
+    case $src in
+      *.json) mp=$src ;;
+      *) mp=${src%/}/manifest-linux-x64.json; [ -f "$mp" ] || mp=${src%/}/manifest.json ;;
+    esac
     [ -f "$mp" ] || die "$(t err_no_manifest "$mp")"
     FEED_BASE=$(cd "$(dirname "$mp")" && pwd)
     mp=$FEED_BASE/$(basename "$mp")
@@ -583,7 +595,7 @@ pick_downloader() {
   elif [ -n "${PYX:-}" ] || PYX=$(command -v python3 2>/dev/null); then DL=python
   else DL=none; fi
 }
-fetch() { # URL 先（途中の物は .part．済んだら名前を変える）
+fetch() { # URL 先（途中の物は .part．済んだら名前を変える）．11/17 H: URL で落ちなければ gh で（fetch_gh）
   local tmp="$2.part" prog=-sS
   mkdir -p "$(dirname "$2")" || return 1
   rm -f "$tmp"
@@ -593,9 +605,32 @@ fetch() { # URL 先（途中の物は .part．済んだら名前を変える）
     wget) wget -q -O "$tmp" "$1" < /dev/null ;;
     python) "$PYX" -I -c 'import shutil, sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=120) as r, open(sys.argv[2], "wb") as f: shutil.copyfileobj(r, f, 1 << 23)' "$1" "$tmp" < /dev/null ;;
-    *) return 2 ;;
-  esac || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$2"
+    *) false ;;
+  esac && { mv -f "$tmp" "$2"; return 0; }
+  rm -f "$tmp"
+  fetch_gh "$1" "$2"
+}
+# 11/17 H: GitHub のリリースが非公開のあいだは URL では落ちない（404）．gh（GitHub CLI）があり，その人に見える置き場なら
+# gh release download で落とす（…/releases/latest/download/<名前> は最新の版，…/releases/download/<版>/<名前> はその版）．
+# gh が無い・ログインしていない・見えないアカウントなら 1（呼んだ側が手で置く案内を出す）
+fetch_gh() { # URL 先
+  local rest repo tag name d
+  command -v gh >/dev/null 2>&1 || return 1
+  case $1 in https://github.com/*/*/releases/*/*) ;; *) return 1 ;; esac
+  rest=${1#https://github.com/}
+  repo=$(printf '%s' "$rest" | cut -d/ -f1-2)
+  name=${1##*/}
+  case $rest in
+    */releases/latest/download/*) tag= ;;
+    */releases/download/*/*) tag=$(printf '%s' "$rest" | cut -d/ -f5) ;;
+    *) return 1 ;;
+  esac
+  d=$(mktemp -d "$TMPD/gh.XXXXXX") || return 1
+  if gh release download $tag -R "$repo" -p "$name" -D "$d" < /dev/null > /dev/null 2> "$d.err" && [ -f "$d/$name" ]; then
+    mv -f "$d/$name" "$2"; rm -rf "$d" "$d.err"; return 0
+  fi
+  rm -rf "$d" "$d.err"
+  return 1
 }
 
 # ============================================================================ 部品を調べる
@@ -849,17 +884,19 @@ BEGIN { FS = "\037"; US = "\037"
 }
 function hex(h,   k, v, c) { h = tolower(h); sub(/^0x/, "", h); if (h == "") return -1; v = 0; for (k = 1; k <= length(h); k++) { c = index("0123456789abcdef", substr(h, k, 1)); if (!c) return -1; v = v * 16 + c - 1 } return v }
 function intable(cc,   m) { for (m = 1; m <= nt; m++) if (cc + 0 >= lo[m] + 0 && cc + 0 < hi[m] + 0) return m; return 0 }
+function expl(cc,   m) { m = intable(cc); return (m > 0 && kd[m] == "experimental") ? 1 : 0 }
 FILENAME == ARGV[1] { ng++; gn[ng] = $1; gc[ng] = $2; gd[ng] = $3; gv[ng] = $4; next }
 { na++; an[na] = $1; av[na] = $2; adev[na] = $3; adrv[na] = $4; aven[na] = $5 }
 END {
   if (ng) {
+    # 11/18 W8: launcher の _pick_nvidia と同じ順（対応するか → 試験的でない物を先に → VRAM → cc）
     best = 0
-    for (j = 1; j <= ng; j++) { it = intable(gc[j]) > 0
-      if (!best || it > bit || (it == bit && (gc[j] + 0 > bc + 0 || (gc[j] + 0 == bc + 0 && gv[j] + 0 > bv + 0)))) { best = j; bit = it; bc = gc[j]; bv = gv[j] } }
+    for (j = 1; j <= ng; j++) { it = intable(gc[j]) > 0; nx = it && !expl(gc[j])
+      if (!best || it > bit || (it == bit && (nx > bnx || (nx == bnx && (gv[j] + 0 > bv + 0 || (gv[j] + 0 == bv + 0 && gc[j] + 0 > bc + 0)))))) { best = j; bit = it; bnx = nx; bc = gc[j]; bv = gv[j] } }
     j = best; m = intable(gc[j])
-    if (m) print en[m] US kd[m] US gn[j] US "nvidia" US gv[j] US gd[j] US "" US ""
-    else print "" US "too_old" US gn[j] US "nvidia" US gv[j] US gd[j] US "" US ""
-    exit
+    if (m) { print en[m] US kd[m] US gn[j] US "nvidia" US gv[j] US gd[j] US "" US ""; exit }
+    # 全部対応外: 対応する Radeon があればそれ（下の探し）．無ければこの断りを出す（Tesla P100＝cc 6.0 は理由つき）
+    nvres = "" US ((gc[j] + 0 >= 6.0 && gc[j] + 0 < 6.1) ? "p100" : "too_old") US gn[j] US "nvidia" US gv[j] US gd[j] US "" US ""
   }
   first = 0
   for (j = 1; j <= na; j++) {
@@ -870,6 +907,7 @@ END {
     if (d >= 0) for (m = 1; m <= nr; m++) if (d >= rlo[m] && d <= rhi[m]) { print ren[m] US "experimental" US an[j] US "amd" US av[j] US "" US adev[j] US adrv[j]; exit }
     for (m = 1; m <= nn; m++) if (ln ~ nre[m]) { print nen[m] US "experimental" US an[j] US "amd" US av[j] US "" US adev[j] US adrv[j]; exit }
   }
+  if (nvres != "") { print nvres; exit }
   if (first) { j = first; d = hex(adev[j]); k = ((d >= 0 && (d in igid)) || tolower(an[j]) ~ igre) ? "igpu" : "too_old"
     print "" US k US an[j] US "amd" US av[j] US "" US adev[j] US adrv[j]; exit }
   for (j = 1; j <= na; j++) if (tolower(aven[j]) == "0x10de") { print "" US "nodriver" US an[j] US "nvidia" US av[j] US "" US adev[j] US adrv[j]; exit }
@@ -920,7 +958,6 @@ detect_env() {
   if ov_has adapters; then
     LC_ALL=C $AWK -F '\t' -v US="$US" '{ n = split($1, k, "\034") } n == 3 && k[1] == "adapters" { v[k[2], k[3]] = $3; if (k[2] + 1 > c) c = k[2] + 1 }
       END { for (j = 0; j < c; j++) print v[j, "name"] US v[j, "vram_gib"] US v[j, "device"] US v[j, "driver"] US v[j, "vendor"] }' "$OVF" > "$TMPD/ads.tsv"
-  elif [ -s "$TMPD/gpus.tsv" ]; then : > "$TMPD/ads.tsv"
   else probe_adapters > "$TMPD/ads.tsv"; fi
   g=$(NV_TABLE=$NV_TABLE RADEON_IDS=$RADEON_IDS RADEON_NAMES=$RADEON_NAMES AMD_IGPU_IDS=$AMD_IGPU_IDS IGPU_NAME_RE=$IGPU_NAME_RE \
       LC_ALL=C $AWK "$AWK_PICK" "$TMPD/gpus.tsv" "$TMPD/ads.tsv")
@@ -934,6 +971,7 @@ EOF
     none) env_add B no_gpu ;;
     igpu) env_add B igpu_only "$G_NAME" ;;
     too_old) env_add B gpu_too_old "$G_NAME" ;;
+    p100) env_add B gpu_p100 "$G_NAME" ;;
     nodriver) env_add B nvidia_no_driver "$G_NAME" ;;
     turing) if [ "$TURING" = block ]; then env_add B gpu_turing_pending "$G_NAME"; else env_add W gpu_untested "$G_NAME"; fi ;;
     untested) env_add W gpu_untested "$G_NAME" ;;
@@ -1093,9 +1131,11 @@ set_stubs() {
   for c in update rollback uninstall; do
     p=$APP/$c.sh
     case $c in update) d='update (only the changed parts)' ;; rollback) d='go back to the version before the last update' ;; uninstall) d='uninstall' ;; esac
-    make_stub "$c" "$d" > "$TMPD/stub"
+    # 11/17 H: update.sh は部品 pack の update.sh（1 本で動く更新の道具．新しい一覧と新しい setup.sh を取ってから入れ替える）をそのまま写す
+    if [ "$c" = update ] && [ -f "$BIN/pack/update.sh" ]; then cp "$BIN/pack/update.sh" "$TMPD/stub"; else make_stub "$c" "$d" > "$TMPD/stub"; fi
     if [ -f "$p" ] && cmp -s "$TMPD/stub" "$p"; then continue; fi
-    cp "$TMPD/stub" "$p" && chmod 755 "$p" && made="${made:+$made$LSEP}$c.sh"
+    # 11/17 H: 名前を変えて入れる（流れている update.sh をその場で書き換えると，sh が続きを新しい中身から読んでしまう）
+    cp "$TMPD/stub" "$p.tmp" && chmod 755 "$p.tmp" && mv -f "$p.tmp" "$p" && made="${made:+$made$LSEP}$c.sh"
   done
   # 入口が流す setup の写し（部品 pack に setup.sh が入れば，そちらが先に使われる）
   if [ -f "$SELF" ] && ! cmp -s "$SELF" "$STATE_DIR/setup.sh" 2>/dev/null; then

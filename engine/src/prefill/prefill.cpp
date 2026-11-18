@@ -1115,6 +1115,12 @@ struct Prefill::Impl {
     float* ple_norm = nullptr;
     uint8_t* region = nullptr;               // the attention/MoE scratch region (idle while the PLE block runs)
     uint64_t region_bytes = 0;
+    // QuantLab pf-smooth (11/17): a borrowed layout's room past its carve (the loan's tail: what a request lent beyond the
+    // chunk's buffers), and the staging slots this layout laid out (stage_slots at the carve) - the layer-major walk's
+    // super-chunk buffers take the tail and the slots past STAGE_GRP while a prompt runs
+    uint8_t* lm_tail = nullptr;
+    uint64_t lm_tail_bytes = 0;
+    int nstage = 0;
     PrefillStats* stats = nullptr;
     // KV streaming: one layer's whole K/V, staged from the host copy per layer and chunk (identity layout)
     strata::kernels::KvHostPools stage;
@@ -1162,6 +1168,7 @@ struct Prefill::Impl {
         // stream uploads the next one and downloads the last one while the compute stream works on this one
         float* R2 = nullptr;
         cudaEvent_t ev_in[2] = {}, ev_done[2] = {}, ev_out[2] = {};
+        bool loan = false;                   // QuantLab pf-smooth: carved from the request's loan (dev is null)
     } lm;
 };
 
@@ -1864,6 +1871,9 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
               std::to_string(o.failed_bytes >> 20) + " MiB)";
         return false;
     }
+    // QuantLab pf-smooth (11/17): a loan's room past the carve (none when the buffers are owned or spilled)
+    m.lm_tail = (o.base != nullptr && !o.spilled && o.cap > o.used) ? o.base + o.used : nullptr;
+    m.lm_tail_bytes = m.lm_tail != nullptr ? o.cap - o.used : 0;
     { int wd = 0; if (cudaGetDevice(&wd) == cudaSuccess) warm_gemm_libraries(wd); else (void) cudaGetLastError(); }
     return true;
 }
@@ -1957,6 +1967,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     }
     m.ring = ring_slots(T);
     const int nstage = stage_slots(T);   // the staged walk may use STAGE_GRP of them
+    m.nstage = nstage;
     if (o.base == nullptr && m.ring > 0) {
         // OWNED buffers: the ring in ONE allocation.  384 separate 2.7 MiB cudaMallocs each round up to a 2 MiB page
         // (~1.3 MiB a slot, ~0.5 GiB in all) that no count ever saw.  A borrowed region keeps its per-slot layout (and
@@ -2016,6 +2027,9 @@ bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::
               std::to_string(o.failed_bytes >> 20) + " MiB)";
         return false;
     }
+    // QuantLab pf-smooth (11/17): the loan's room past the carve, for the layer-major walk's super-chunk
+    m.lm_tail = !o.spilled && o.cap > o.used ? o.base + o.used : nullptr;
+    m.lm_tail_bytes = m.lm_tail != nullptr ? o.cap - o.used : 0;
     return true;
 }
 
@@ -6326,6 +6340,55 @@ constexpr int64_t kLmDefaultOnTokens = 32768;
 // u_rows (rows) | u_w (rows), E = the most entries a layer can split into
 int64_t lm_entries_max(int64_t rows, int64_t G) { return NE + rows / std::max<int64_t>(G, 1) + 2; }
 int64_t lm_table_ints(int64_t rows, int64_t G) { return 5 * rows + 3 * lm_entries_max(rows, G); }
+// the super-chunk's device bytes (lm_prepare's sum, with room for each buffer's 256-byte rounding)
+uint64_t lm_dev_bytes(int64_t s, int64_t T, bool r_dev) {
+    const int64_t G = T * K;
+    const uint64_t per = (uint64_t) (2 * N + HC + 2 * K) * 4 + (uint64_t) N * 2 + (r_dev ? (uint64_t) D * 4 : 0);
+    return (uint64_t) s * per + (uint64_t) lm_table_ints(s * K, G) * 4 + 4096 + (r_dev ? 0 : (uint64_t) T * D * 4 + 256);
+}
+// QuantLab pf-smooth (11/17): the super-chunk's buffers one by one, in lm_prepare's order (each rounded up to 256 bytes;
+// 0 = not taken in this mode), and how they are placed in a loan's two spans (lm_place)
+enum { kLmMixed, kLmAcc, kLmMixedH, kLmInj, kLmIds, kLmW, kLmR, kLmTab, kLmR2, kLmArrays };
+struct LmArrays { uint64_t b[kLmArrays] = {}; };
+LmArrays lm_arrays(int64_t s, int64_t T, bool r_dev) {
+    auto r256 = [](uint64_t x) { return (x + 255) & ~(uint64_t) 255; };
+    LmArrays a;
+    a.b[kLmMixed] = r256((uint64_t) s * N * 4);
+    a.b[kLmAcc] = r256((uint64_t) s * N * 4);
+    a.b[kLmMixedH] = r256((uint64_t) s * N * 2);
+    a.b[kLmInj] = r256((uint64_t) s * HC * 4);
+    a.b[kLmIds] = r256((uint64_t) s * K * 4);
+    a.b[kLmW] = r256((uint64_t) s * K * 4);
+    a.b[kLmR] = r_dev ? r256((uint64_t) s * D * 4) : 0;
+    a.b[kLmTab] = r256((uint64_t) lm_table_ints(s * K, T * K) * 4);
+    a.b[kLmR2] = r_dev ? 0 : r256((uint64_t) T * D * 4);
+    return a;
+}
+// The tail bytes the buffers need when the ring's spare span holds `hole` bytes: largest first (ties in order), each
+// into the span when it still fits there, else into the tail.  `reg` / `off` (optional): each one's span (1: the ring's,
+// 0: the tail) and offset.  The serve path's loan and lm_prepare place them by this one rule.
+uint64_t lm_place(const LmArrays& a, uint64_t hole, int8_t* reg, uint64_t* off) {
+    int ord[kLmArrays];
+    for (int i = 0; i < kLmArrays; ++i) ord[i] = i;
+    std::stable_sort(ord, ord + kLmArrays, [&](int x, int y) { return a.b[x] > a.b[y]; });
+    uint64_t used_h = 0, used_t = 0;
+    for (int k = 0; k < kLmArrays; ++k) {
+        const int i = ord[k];
+        if (a.b[i] == 0) continue;
+        if (used_h + a.b[i] <= hole) {
+            if (reg) reg[i] = 1;
+            if (off) off[i] = used_h;
+            used_h += a.b[i];
+        } else {
+            if (reg) reg[i] = 0;
+            if (off) off[i] = used_t;
+            used_t += a.b[i];
+        }
+    }
+    return used_t;
+}
+// the ring's spare span: the staging slots past STAGE_GRP of a layout, when they lie back to back
+struct LmHole { uint8_t* p = nullptr; uint64_t bytes = 0; };
 }  // namespace
 
 void Prefill::lm_release() {
@@ -6334,81 +6397,132 @@ void Prefill::lm_release() {
     if (m.lm.dev) {
         cudaStreamSynchronize(m.cs);
         cudaFree(m.lm.dev);
+    } else if (m.lm.loan) {   // QuantLab pf-smooth: the loan goes back (refilled) after this: nothing may still write it
+        cudaStreamSynchronize(m.cs);
+        cudaStreamSynchronize(m.copy);
+        // ... and the pinned RAM it took goes back too (the auto walk keeps none of it between prompts: on Windows the RAM
+        // copy has page-locked about all it may)
+        if (m.lm.R_host) cudaFreeHost(m.lm.R_host);
+        m.lm.R_host = nullptr;
+        m.lm.R_host_n = 0;
     }
     m.lm.dev = nullptr;
+    m.lm.loan = false;
     m.lm.mixed = m.lm.acc = m.lm.inj = m.lm.R = m.lm.w = m.lm.R2 = nullptr;
     m.lm.mixed_h = nullptr;
     m.lm.ids = m.lm.tab = nullptr;
     m.lm.S = 0;
 }
 
-int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
+// QuantLab pf-smooth (11/17): lm_prepare's tests that do not depend on the prompt, on their own (the serve path asks once
+// at start whether its auto walk can run at all).  The same tests in the same order as before.
+bool Prefill::layer_major_supported(std::string& why) {
+    if (impl_ == nullptr || impl_->g == nullptr) { why = "not initialized"; return false; }
     Impl& m = *impl_;
-    if (m.g == nullptr) { why = "not initialized"; return 0; }
 #if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
     // only NVIDIA CUDA has run this path; on an AMD build the prompt stays on the chunk-major path
     why = "layer-major prefill has only been run on NVIDIA CUDA";
-    return 0;
+    return false;
 #endif
     const core::ModelGeometry& g = *m.g;
-    const core::OnDevice on_device(m.device);   // a layer split's later stage is sized on its own GPU
     // layer split (2026-10-24): each stage runs its own layers layer-major over the same super-chunk and hands the
     // super-chunk's rows to the next one (lm_prepare_chain); the peer GPU's expert share and the stage helper have
     // no layer-major form
     const bool split = stage_lb_ != 0 || stage_le_ != g.n_layers || next_ != nullptr;
-    if (hand_in_ != nullptr) { why = "a layer split's chunk hand-off is in use"; return 0; }
-    if (m.pp || helper_ != nullptr || core::peer_portable()) { why = "a peer GPU"; return 0; }
+    if (hand_in_ != nullptr) { why = "a layer split's chunk hand-off is in use"; return false; }
+    if (m.pp || helper_ != nullptr || core::peer_portable()) { why = "a peer GPU"; return false; }
     // the PLE block (layer 1) reads the token history: on a split it runs in a first stage that holds layers 0 and 1
     // (a later stage never reaches it)
     if (split && m.ss->ple.ready() && stage_lb_ <= 1 && !(stage_lb_ == 0 && stage_le_ >= 2)) {
         why = "a layer split whose PLE layer is not in the first stage";
-        return 0;
+        return false;
     }
-    if (embd_rows != nullptr) { why = "an image prompt"; return 0; }
-    // features of run_impl this walk does not carry: the DFlash2 drafter's prompt taps, and KVA's approximate late layers
-    // (a prompt that wants them takes the chunk-major path, which has both)
-    if (!tap_layers_.empty()) { why = "the DFlash2 drafter's prompt taps"; return 0; }
-    if (kva_config().on) { why = "STRATA_KVA is on"; return 0; }
-    if (stop_at_chunk) { why = "a batch read that yields at chunk boundaries"; return 0; }
-    if (force_chunk_ > 0) { why = "a --prefill-pipe plan sets the chunks of this read"; return 0; }   // (left set for run_impl)
+    if (kva_config().on) { why = "STRATA_KVA is on"; return false; }
 #if STRATA_EXPERT_NIBBLE_BUILT   // the 4-bit expert slots (STRATA_EXPERT_NIBBLE) are gathered for MMQ only by run_impl
     for (int64_t l = 0; l < g.n_layers; ++l)
-        if (core::nibble::layer(l).on) { why = "STRATA_EXPERT_NIBBLE (the experts are 4-bit slots)"; return 0; }
+        if (core::nibble::layer(l).on) { why = "STRATA_EXPERT_NIBBLE (the experts are 4-bit slots)"; return false; }
 #endif
     // run_impl's debug hooks on the routing and the rows have no layer-major form
     if (std::getenv("STRATA_DBG_FEAT") || std::getenv("STRATA_DBG_ROUTE_OVERRIDE") || std::getenv("STRATA_PREFILL_DUMP_R_ALL")) {
         why = "a routing or row debug dump";
-        return 0;
+        return false;
     }
     const MmqPlan& mp = mmq_plan();
-    if ((int64_t) mp.layer.size() < g.n_layers) { why = "the expert plan has fewer layers than the model"; return 0; }
+    if ((int64_t) mp.layer.size() < g.n_layers) { why = "the expert plan has fewer layers than the model"; return false; }
     // each layer's experts on MMQ, or (port, 2026-10-24) on run_impl's FP16 path; the buffers each one needs
     int64_t n_mmq = 0;
     for (int64_t l = 0; l < g.n_layers; ++l) n_mmq += mp.layer[(size_t) l] ? 1 : 0;
-    if (n_mmq > 0 && (!m.grp_gu || !m.grp_d || !m.Xq || !m.H || !m.Hq)) { why = "the MMQ buffers are missing"; return 0; }
+    if (n_mmq > 0 && (!m.grp_gu || !m.grp_d || !m.Xq || !m.H || !m.Hq)) { why = "the MMQ buffers are missing"; return false; }
     if (n_mmq < g.n_layers) {
         bool dq_ok = true;
         for (int i = 0; i < DQ; ++i) dq_ok = dq_ok && m.dq_gu[i] && m.dq_d[i];
-        if (!m.Xs || !m.Hh || !dq_ok) { why = "the FP16 expert path's buffers are missing"; return 0; }
+        if (!m.Xs || !m.Hh || !dq_ok) { why = "the FP16 expert path's buffers are missing"; return false; }
     }
     // 0.2.2's expert formats this path's MMQ pass does not carry (port, 2026-10-24): APR's Hadamard-folded layers,
     // NVFP4's tails and w4a4 activations, and IQ1_M layers that only the WMMA tiles run
     {
         const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
         for (int64_t l = 0; l < g.n_layers; ++l) {
-            if (l < (int64_t) mp.wmma_only.size() && mp.wmma_only[(size_t) l]) { why = "a layer needs the WMMA tiles"; return 0; }
+            if (l < (int64_t) mp.wmma_only.size() && mp.wmma_only[(size_t) l]) { why = "a layer needs the WMMA tiles"; return false; }
             if (!lay.native) continue;
             const auto& f = lay.fmt[(size_t) l];
-            if (f.had_gu || f.had_d) { why = "an APR (Hadamard-folded) layer"; return 0; }
-            if (f.tail_off || mmq::fp4_activations(f.gu_type)) { why = "an NVFP4 layer"; return 0; }
+            // pf-smooth: APR (Hadamard-folded) layers are rotated as run_impl rotates them (x before its q8_1 / FP16 rows,
+            // H before the down product); the sign vectors are the ones init resolved for run_impl
+            if (f.had_gu || f.had_d) {
+                const bool sx_ok = !f.had_gu || ((size_t) l < m.had_sx.size() && m.had_sx[(size_t) l] != nullptr);
+                const bool sh_ok = !f.had_d || ((size_t) l < m.had_sh.size() && m.had_sh[(size_t) l] != nullptr);
+                if (!sx_ok || !sh_ok || f.had_block <= 0) { why = "an APR (Hadamard-folded) layer without its sign vectors"; return false; }
+            }
+            if (f.tail_off || mmq::fp4_activations(f.gu_type)) { why = "an NVFP4 layer"; return false; }
+            // pf-smooth: a QuantLab mixed (per-expert K) layer's experts differ in format.  Every format of the layer is
+            // checked, not just fmt[l] (its largest); the MMQ pass below takes one type per launch, so a mixed layer on
+            // MMQ (STRATA_QL_MMQ_MIXED=1) is declined here until the walk groups it by class (never a wrong type)
+            if (lay.layer_mixed(l)) {
+                for (const auto& c : lay.cls_fmt[(size_t) l]) {
+                    if (c.tail_off || mmq::fp4_activations(c.gu_type)) { why = "an NVFP4 class in a mixed layer"; return false; }
+                    // the walk rotates by the layer's fold (fmt[l], as run_impl does); the loader gives every class the
+                    // layer's fold (expert_layout.cpp: "a mixed layer's formats rotate exactly like the layer's own"), so
+                    // a class that differs is a layout this walk was not written for
+                    if (c.had_gu != f.had_gu || c.had_d != f.had_d || ((f.had_gu || f.had_d) && c.had_block != f.had_block)) {
+                        why = "a mixed layer whose classes fold differently";
+                        return false;
+                    }
+                }
+                // on MMQ (STRATA_QL_MMQ_MIXED=1): the walk groups its experts by class (one type per launch), each class
+                // in its own region of grp_gu / grp_d, as run_impl's MixedGroups
+                if (mp.layer[(size_t) l] && (mp.mixed.size() <= (size_t) l || !mp.mixed[(size_t) l] ||
+                                             (int) lay.cls_fmt[(size_t) l].size() > mp.classes_max)) {
+                    why = "a mixed (per-expert K) layer on MMQ outside the class groups";
+                    return false;
+                }
+            } else if (mp.layer[(size_t) l] && f.r1q2) {
+                why = "an R1Q2 layer outside a mixed layer's MMQ groups";
+                return false;
+            }
         }
     }
-    if (m.fused_bufs) { why = "the fused expert layout"; return 0; }
-    if (!m.GU || !m.Dm || (n_mmq > 0 && !m.ids_identity)) { why = "the MoE buffers are missing"; return 0; }
+    if (m.fused_bufs) { why = "the fused expert layout"; return false; }
+    if (!m.GU || !m.Dm || (n_mmq > 0 && !m.ids_identity)) { why = "the MoE buffers are missing"; return false; }
+    return true;
+}
+
+int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
+    Impl& m = *impl_;
+    if (!layer_major_supported(why)) return 0;
+    const core::OnDevice on_device(m.device);   // a layer split's later stage is sized on its own GPU
+    if (embd_rows != nullptr) { why = "an image prompt"; return 0; }
+    // features of run_impl this walk does not carry: the DFlash2 drafter's prompt taps, and KVA's approximate late layers
+    // (a prompt that wants them takes the chunk-major path, which has both)
+    if (!tap_layers_.empty()) { why = "the DFlash2 drafter's prompt taps"; return 0; }
+    if (stop_at_chunk) { why = "a batch read that yields at chunk boundaries"; return 0; }
+    if (force_chunk_ > 0) { why = "a --prefill-pipe plan sets the chunks of this read"; return 0; }   // (left set for run_impl)
     // (an explicit STRATA_PREFILL_LM_TOKENS may be one chunk: the A/B against the default path, experts aside)
     const int64_t min_s = lm_tokens_env() > 0 ? m.T : 2 * m.T;
     if (n < min_s) { why = "a short prompt"; return 0; }
-    const int64_t want = lm_tokens_env() > 0 ? lm_tokens_env() : (lm_by_default_ ? kLmDefaultOnTokens : kLmDefaultTokens);
+    // QuantLab pf-smooth (11/17): the serve path's auto walk targets what its loan was sized for (the whole prompt)
+    const int64_t want = lm_tokens_env() > 0 ? lm_tokens_env()
+                       : lm_auto_ && lm_auto_tokens_ > 0 ? lm_auto_tokens_
+                                                          : (lm_by_default_ ? kLmDefaultOnTokens : kLmDefaultTokens);
     int64_t S = std::max<int64_t>(min_s, want / m.T * m.T);
     S = std::min<int64_t>(S, (n + m.T - 1) / m.T * m.T);
     if (cap > 0) {
@@ -6416,18 +6530,44 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
         S = std::min(S, cap);
     }
     const int64_t G = m.T * K;
-    const auto dev_bytes = [&](int64_t s, bool r_dev) {
-        const uint64_t per = (uint64_t) (2 * N + HC + 2 * K) * 4 + (uint64_t) N * 2 + (r_dev ? (uint64_t) D * 4 : 0);
-        return (uint64_t) s * per + (uint64_t) lm_table_ints(s * K, G) * 4 + 4096 +
-               (r_dev ? 0 : (uint64_t) m.T * D * 4 + 256);
-    };
+    const auto dev_bytes = [&](int64_t s, bool r_dev) { return lm_dev_bytes(s, m.T, r_dev); };
+    // QuantLab pf-smooth (11/17): the auto walk's room is the request's loan - the borrowed region past the chunk's buffers
+    // (lm_tail) and the staging slots past STAGE_GRP (the walk stages through the first STAGE_GRP only) - so it takes no
+    // VRAM beside the expert cache: the cache, the K/V and the reserve are sized as for the chunk walk.  Otherwise (the
+    // explicit STRATA_PREFILL_LAYER_MAJOR, a layer split) new VRAM, within what is free minus the margin, as before.
+    const LmHole hole = [&]() -> LmHole {
+        LmHole h;
+        const int ns = m.nstage;
+        if (!lm_auto_ || ns <= STAGE_GRP || m.stage_dev[STAGE_GRP] == nullptr) return h;
+        uint8_t* p0 = m.stage_dev[STAGE_GRP];
+        const size_t stride = ns > STAGE_GRP + 1 ? (size_t) (m.stage_dev[STAGE_GRP + 1] - p0) : (size_t) MAXBLOB();
+        if (m.stage_dev[STAGE_GRP + 1 < ns ? STAGE_GRP + 1 : STAGE_GRP] < p0 || stride < (size_t) MAXBLOB()) return h;
+        for (int i = STAGE_GRP + 1; i < ns; ++i)
+            if (m.stage_dev[i] != p0 + (size_t) (i - STAGE_GRP) * stride) return h;   // not back to back: not used
+        h.p = p0;
+        h.bytes = (uint64_t) (ns - 1 - STAGE_GRP) * stride + (uint64_t) MAXBLOB();
+        return h;
+    }();
+    // the tail: an owned layout's explicit room (set_layer_major_auto), else the borrowed region past the carve
+    uint8_t* const tail = lm_room_ != nullptr ? (uint8_t*) lm_room_ : m.lm_tail;
+    const uint64_t tail_bytes = lm_room_ != nullptr ? lm_room_bytes_ : m.lm_tail_bytes;
+    const bool use_loan = lm_auto_ && (tail_bytes > 0 || hole.bytes > 0);
     size_t free_b = 0, total_b = 0;
-    cudaMemGetInfo(&free_b, &total_b);
-    const int64_t room = (int64_t) free_b - lm_margin_bytes(lm_by_default_);
-    m.lm.free_mib = (int64_t) (free_b >> 20);
+    int64_t room = 0;
+    if (use_loan) {
+        m.lm.free_mib = (int64_t) ((tail_bytes + hole.bytes) >> 20);
+    } else {
+        cudaMemGetInfo(&free_b, &total_b);
+        room = (int64_t) free_b - lm_margin_bytes(lm_by_default_);
+        m.lm.free_mib = (int64_t) (free_b >> 20);
+    }
+    auto fits = [&](int64_t s, bool r_dev) {
+        if (!use_loan) return (int64_t) dev_bytes(s, r_dev) <= room;
+        return lm_place(lm_arrays(s, m.T, r_dev), hole.bytes, nullptr, nullptr) <= tail_bytes;
+    };
     auto fit = [&](bool r_dev) {   // the largest super-chunk (a multiple of the chunk) that fits `room`
         int64_t s = S;
-        while (s >= min_s && (int64_t) dev_bytes(s, r_dev) > room) s -= m.T;
+        while (s >= min_s && !fits(s, r_dev)) s -= m.T;
         return s >= min_s ? s : (int64_t) 0;
     };
     // a stage after the first: its rows arrive in R_host (the previous stage writes them there), so they stay there
@@ -6436,12 +6576,21 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     int64_t s_use = 0;
     if (mode == 1) { s_use = fit(true); r_dev = true; }
     else if (mode == 2) { s_use = fit(false); }
-    else {   // auto: VRAM when the whole target fits there, else pinned host (the bigger super-chunk wins)
+    else if (use_loan) {
+        // QuantLab pf-smooth (11/17): the auto walk keeps its rows in VRAM, in more super-chunks when it must: pinned rows
+        // move 80 KB a token and layer over PCIe (a 7K super-chunk 26 GB, more than a pass of the experts), and on Windows
+        // the RAM copy has page-locked about all it may - an extra 0.3 GB pinned there left the next request's decode
+        // stalled (Sync-XS, 8 GB: 2 of 3 runs; the chunk walk 0 of 3).  Pinned rows only when no VRAM super-chunk fits.
+        s_use = fit(true);
+        if (s_use > 0) r_dev = true;
+        else s_use = fit(false);
+    } else {   // auto: VRAM when the whole target fits there, else pinned host (the bigger super-chunk wins)
         const int64_t sv = fit(true);
         if (sv == S) { s_use = sv; r_dev = true; } else s_use = fit(false);
     }
     if (s_use <= 0) {
-        why = "no VRAM for a super-chunk (" + std::to_string(free_b >> 20) + " MiB free)";
+        why = use_loan ? "no room for a super-chunk in the prompt's loan (" + std::to_string(m.lm.free_mib) + " MiB)"
+                       : "no VRAM for a super-chunk (" + std::to_string(free_b >> 20) + " MiB free)";
         return 0;
     }
     Impl::LmBufs& lb = m.lm;
@@ -6461,29 +6610,63 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     }
     if (!r_dev) {
         int32_t* rh = (int32_t*) lb.R_host;
-        if (!host_grow(rh, lb.R_host_n, (size_t) s_use * D)) { why = "no pinned RAM for the residual rows"; lb.R_host = nullptr; return 0; }
-        lb.R_host = (float*) rh;
+        if (!host_grow(rh, lb.R_host_n, (size_t) s_use * D)) {
+            lb.R_host = nullptr;
+            // QuantLab pf-smooth (11/17): no pinned RAM for the rows (Windows, the RAM copy page-locked most of it: measured,
+            // Sync-XS on an 8 GB card, a 6.6K super-chunk's 0.27 GB): the rows in VRAM instead, in a smaller super-chunk
+            // (more of them) - not the chunk walk, whose loan this request already lent
+            const int64_t sv = mode == 0 ? fit(true) : 0;
+            if (sv <= 0) { why = "no pinned RAM for the residual rows"; return 0; }
+            r_dev = true;
+            s_use = sv;
+        } else {
+            lb.R_host = (float*) rh;
+        }
     }
-    const uint64_t bytes = dev_bytes(s_use, r_dev);
-    void* d = nullptr;
-    if (cudaMalloc(&d, bytes) != cudaSuccess) {
-        cudaGetLastError();
-        why = "the super-chunk's buffers (" + std::to_string(bytes >> 20) + " MiB) do not fit";
-        return 0;
+    uint8_t* at[kLmArrays] = {};
+    if (use_loan) {
+        // (the loan's slots held experts until the request lent them; nothing of this path may still be reading the ring)
+        if (cudaStreamSynchronize(m.cs) != cudaSuccess || cudaStreamSynchronize(m.copy) != cudaSuccess) {
+            cudaGetLastError();
+            why = "the prompt streams failed before the super-chunk was laid out";
+            return 0;
+        }
+        const LmArrays a = lm_arrays(s_use, m.T, r_dev);
+        int8_t reg[kLmArrays] = {};
+        uint64_t off[kLmArrays] = {};
+        if (lm_place(a, hole.bytes, reg, off) > tail_bytes) { why = "the super-chunk's buffers do not fit the loan"; return 0; }
+        for (int i = 0; i < kLmArrays; ++i)
+            at[i] = a.b[i] == 0 ? nullptr : (reg[i] == 1 ? hole.p : tail) + off[i];
+        lb.dev = nullptr;   // (nothing to free: the loan goes back with the request's refill)
+        lb.loan = true;
+    } else {
+        const uint64_t bytes = dev_bytes(s_use, r_dev);
+        void* d = nullptr;
+        if (cudaMalloc(&d, bytes) != cudaSuccess) {
+            cudaGetLastError();
+            why = "the super-chunk's buffers (" + std::to_string(bytes >> 20) + " MiB) do not fit";
+            return 0;
+        }
+        lb.dev = d;
+        lb.loan = false;
+        const LmArrays a = lm_arrays(s_use, m.T, r_dev);
+        uint8_t* q = (uint8_t*) d;
+        for (int i = 0; i < kLmArrays; ++i) {   // in order, as before
+            if (a.b[i] == 0) continue;
+            at[i] = q;
+            q += a.b[i];
+        }
     }
-    lb.dev = d;
-    uint8_t* q = (uint8_t*) d;
-    auto carve_b = [&](size_t b) { uint8_t* p = q; q += (b + 255) & ~(size_t) 255; return p; };
-    lb.mixed = (float*) carve_b((size_t) s_use * N * 4);
-    lb.acc = (float*) carve_b((size_t) s_use * N * 4);
-    lb.mixed_h = (uint16_t*) carve_b((size_t) s_use * N * 2);
-    lb.inj = (float*) carve_b((size_t) s_use * HC * 4);
-    lb.ids = (int32_t*) carve_b((size_t) s_use * K * 4);
-    lb.w = (float*) carve_b((size_t) s_use * K * 4);
-    lb.R = r_dev ? (float*) carve_b((size_t) s_use * D * 4) : nullptr;
-    lb.tab = (int32_t*) carve_b(tab * 4);
+    lb.mixed = (float*) at[kLmMixed];
+    lb.acc = (float*) at[kLmAcc];
+    lb.mixed_h = (uint16_t*) at[kLmMixedH];
+    lb.inj = (float*) at[kLmInj];
+    lb.ids = (int32_t*) at[kLmIds];
+    lb.w = (float*) at[kLmW];
+    lb.R = r_dev ? (float*) at[kLmR] : nullptr;
+    lb.tab = (int32_t*) at[kLmTab];
     lb.tab_n = tab;
-    lb.R2 = r_dev ? nullptr : (float*) carve_b((size_t) m.T * D * 4);
+    lb.R2 = r_dev ? nullptr : (float*) at[kLmR2];
     for (int b = 0; b < 2; ++b)
         for (cudaEvent_t* e : {&lb.ev_in[b], &lb.ev_done[b], &lb.ev_out[b]})
             if (*e == nullptr && cudaEventCreateWithFlags(e, cudaEventDisableTiming) != cudaSuccess) {
@@ -6496,6 +6679,19 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     lb.r_dev = r_dev;
     lb.S = s_use;
     return s_use;
+}
+
+uint64_t Prefill::layer_major_bytes(int64_t s, int64_t chunk, bool r_dev) { return lm_dev_bytes(s, chunk, r_dev); }
+
+uint64_t Prefill::layer_major_tail_bytes(int64_t s, int64_t chunk, bool r_dev) {
+    return lm_place(lm_arrays(s, chunk, r_dev), layer_major_ring_room(chunk), nullptr, nullptr);
+}
+
+uint64_t Prefill::layer_major_ring_room(int64_t chunk) {
+    const int ns = stage_slots((size_t) chunk);
+    if (ns <= STAGE_GRP) return 0;
+    const uint64_t stride = ((uint64_t) MAXBLOB() + 256 + 255) & ~(uint64_t) 255;   // a borrowed slot (Alloc::take)
+    return (uint64_t) (ns - 1 - STAGE_GRP) * stride + (uint64_t) MAXBLOB();
 }
 
 // A layer split: every stage gets the same super-chunk (the smallest any of them fits), re-sized until they agree.
@@ -6697,7 +6893,25 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
             if (e < 0 || e >= NE) { err = "prefill (layer-major): routed id out of range"; return false; }
             ++cnt[(size_t) e];
         }
-        for (int32_t e = 0; e < NE; ++e) off[(size_t) e + 1] = off[(size_t) e] + cnt[(size_t) e];
+        // pf-smooth: the rows' order.  Experts in id order (off[e]..off[e]+cnt[e] are expert e's rows), or on a mixed MMQ
+        // layer (QuantLab, STRATA_QL_MMQ_MIXED=1) in (class, id) order - run_impl's mmq_class_rows - so that a group of
+        // one class has contiguous rows.  Within an expert the rows stay in token order.  The walk below still stages
+        // the experts in id order.
+        const bool mixed_l = lay.native && lay.layer_mixed(l) && mmq_plan().layer[(size_t) l] &&
+                             (size_t) l < mmq_plan().mixed.size() && mmq_plan().mixed[(size_t) l];
+        auto cls_of = [&](int32_t e) -> int32_t { return (int32_t) lay.ecls[lay.eidx(l, e)]; };
+        std::vector<int32_t> eorder;
+        for (int32_t e = 0; e < NE; ++e)
+            if (cnt[(size_t) e] > 0) eorder.push_back(e);
+        if (mixed_l)
+            std::stable_sort(eorder.begin(), eorder.end(), [&](int32_t a, int32_t b) {
+                return cls_of(a) != cls_of(b) ? cls_of(a) < cls_of(b) : a < b;
+            });
+        {
+            int32_t cursor = 0;
+            for (int32_t e : eorder) { off[(size_t) e] = cursor; cursor += cnt[(size_t) e]; }
+            off[(size_t) NE] = cursor;
+        }
         // ---- the routed experts in id order: resident ones from the cache, the others staged once (run_impl's walk)
         // (started before the tables are built: the stager's threads read while the host builds them)
         std::vector<int32_t> uniq;
@@ -6746,9 +6960,11 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
         }
         struct Entry { int32_t e, r0, nr; };
         std::vector<Entry> ents;
-        for (int32_t e = 0; e < NE; ++e)
-            for (int32_t r = off[(size_t) e]; r < off[(size_t) e + 1]; r += (int32_t) G)
-                ents.push_back({e, r, (int32_t) std::min<int64_t>(G, off[(size_t) e + 1] - r)});
+        for (int32_t e : eorder) {   // (id order unless mixed_l: then (class, id))
+            const int32_t r_end = off[(size_t) e] + cnt[(size_t) e];
+            for (int32_t r = off[(size_t) e]; r < r_end; r += (int32_t) G)
+                ents.push_back({e, r, (int32_t) std::min<int64_t>(G, r_end - r)});
+        }
         struct Grp { size_t j0, j1; int32_t r0, nr, maxr; int64_t b_at, u_at, uo_at, nu; };
         std::vector<Grp> grps;
         for (size_t j = 0; j < ents.size();) {
@@ -6756,7 +6972,8 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
             gp.j0 = j;
             gp.r0 = ents[j].r0;
             int32_t nr = 0, maxr = 0;
-            while (j < ents.size() && j - gp.j0 < (size_t) MMQ_GROUP && nr + ents[j].nr <= G) {
+            while (j < ents.size() && j - gp.j0 < (size_t) MMQ_GROUP && nr + ents[j].nr <= G &&
+                   (!mixed_l || cls_of(ents[j].e) == cls_of(ents[gp.j0].e))) {   // pf-smooth: a mixed group is one class
                 nr += ents[j].nr;
                 maxr = std::max(maxr, ents[j].nr);
                 ++j;
@@ -6828,12 +7045,13 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
             else last_ent.back() = j;
         }
         int stage_next = 0;
+        int lm_stage_n = STAGE;   // the ring slots the walk stages through (QuantLab pf-smooth: STAGE_GRP when it batches)
         auto stage_one = [&](size_t u) -> bool {
             const int32_t e = uniq[u];
             if (resident(e)) return true;
             if (m.src == nullptr) { err = "prefill (layer-major): an expert is neither resident nor in a source"; return false; }
             const int sl = stage_next;
-            stage_next = (stage_next + 1) % STAGE;
+            stage_next = (stage_next + 1) % lm_stage_n;
             const auto tq = Clock::now();
             const bool pinned = m.src->pinned(l, e);
             const uint8_t* b = pinned ? m.src->blob_stable(l, e) : nullptr;
@@ -6864,10 +7082,203 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
         // two FP16 GEMMs into the group's Dm rows; the group's rows are added per token as on the MMQ path
         const bool fp16_l = !mmq_plan().layer[(size_t) l];
         const size_t mmq_gub = fp16_l ? 0 : mmq::matrix_bytes(mmq_gt, 1280, N), mmq_db = fp16_l ? 0 : mmq::matrix_bytes(mmq_dt, N, 640);
+        // pf-smooth: APR (prism.hadamard) as run_impl takes it - a folded gate/up reads x rotated (MMQ: the q8_1 rows come
+        // from the rotated FP32 rows, as run_impl's Xr; FP16: the gathered FP16 rows rotated in place, as its Xs), a
+        // folded down reads H rotated (MMQ: FP32 H before its q8_1; FP16: the FP16 H in place).  The FFN input rows of
+        // the super-chunk (lb.mixed) have no reader after this layer's experts (the shared expert ran with the
+        // attention passes; the next layer writes them anew), so the MMQ path rotates them in place, once per layer.
+        const bool had_gu = lay.native && lay.fmt[(size_t) l].had_gu;
+        const bool had_d = lay.native && lay.fmt[(size_t) l].had_d;
+        const int had_block = lay.native ? lay.fmt[(size_t) l].had_block : 0;
+        const float* had_sx = had_gu ? m.had_sx[(size_t) l] : nullptr;
+        const float* had_sh = had_d ? m.had_sh[(size_t) l] : nullptr;
+        if (had_gu && !fp16_l) strata::kernels::hadamard_rows(lb.mixed, lb.mixed, Sn, N, had_block, had_sx, cs);
         size_t staged = 0, u = 0;
         const uint8_t* blob_dev = nullptr;
         size_t gi = 0;
         int dq = -1;   // FP16 path: the dequant slot of the current expert
+        // ---- pf-smooth: a mixed MMQ layer (QuantLab, STRATA_QL_MMQ_MIXED=1).  Its groups are of one class (the rows are in
+        // (class, id) order, above), but the experts are still staged and met in id order.  Each expert is gathered,
+        // by its own format, into every entry slot it has in its class's region of grp_gu / grp_d (run_impl's
+        // MixedGroups layout); a group is launched as soon as its last entry is in.  A class's experts are met in
+        // increasing id, which is its groups' order, so at most one group of a class is filling at a time, and the
+        // launch is on the stream before the next gather into that region.  Products per group as run_impl's mixed
+        // groups: x as q8_1 of the layer's largest gate/up type (run_impl's Xq), gate/up and down of the class's types,
+        // H to q8_1 of the class's down type; the rows are then added per token (moe_scatter_add), in group order.
+        if (mixed_l) {
+            const MmqPlan& mpl = mmq_plan();
+            const auto& cls = lay.cls_fmt[(size_t) l];
+            std::vector<int32_t> efirst((size_t) NE, -1), elast((size_t) NE, -1);
+            for (size_t j = 0; j < ents.size(); ++j) {
+                const int32_t e = ents[j].e;
+                if (efirst[(size_t) e] < 0) efirst[(size_t) e] = (int32_t) j;
+                elast[(size_t) e] = (int32_t) j;
+            }
+            std::vector<int32_t> grp_of_ent(ents.size(), -1), gfill(grps.size(), 0);
+            for (size_t g2 = 0; g2 < grps.size(); ++g2)
+                for (size_t j = grps[g2].j0; j < grps[g2].j1; ++j) grp_of_ent[j] = (int32_t) g2;
+            size_t launched = 0;
+            // QuantLab pf-smooth (11/17): STRATA_QL_PREFILL_GATHER=1 (run_impl's batches, ported to this walk) - with every
+            // class R1Q2, the experts met are gathered in batches: one copy wait (the copies land in order, so the batch's
+            // last staged blob covers the others), one gather_r1q2_batch launch per 32 experts and one release event per
+            // batch, in place of a wait, a launch and an event per expert.  The same words into the same group slots.  The
+            // walk then stages through STAGE_GRP ring slots, at most STAGE_GRP - MMQ_GROUP - 1 experts ahead, and a batch
+            // holds at most MMQ_GROUP of them, so no slot is staged into before its batch released it.  A batch is gathered
+            // when a group completes (its products follow), when it holds MMQ_GROUP ring slots, and at the layer's end; a
+            // gather inside an expert's entries keeps that expert's slot (its later entries still read it).
+            bool all_r1q2 = !cls.empty();
+            for (const auto& cf : cls) all_r1q2 = all_r1q2 && cf.r1q2;
+            const bool lm_batch = all_r1q2 && ql_prefill_gather() && ql_r1q2_batch();
+            const size_t ahead = lm_batch ? (size_t) (STAGE_GRP - MMQ_GROUP - 1) : (size_t) STAGE - 1;
+            if (lm_batch) {
+                lm_stage_n = STAGE_GRP;
+                if (static bool said_b = false; !said_b) {
+                    said_b = true;
+                    std::fprintf(stderr, "strata prefill: layer-major: a mixed layer's R1Q2 experts are gathered in batches "
+                                         "(STRATA_QL_PREFILL_GATHER=1, QuantLab pf-smooth)\n");
+                }
+            }
+            std::vector<mmq::R1q2Item> bitems;
+            if (lm_batch) bitems.reserve(64);
+            int bslots[MMQ_GROUP + 1];
+            int bn = 0, bcur = -1;
+            auto bflush = [&]() {
+                if (bn > 0) {
+                    pt.mark(kPfWaitCopy, cs);
+                    cudaStreamWaitEvent(cs, m.copied[bslots[bn - 1]], 0);
+                }
+                if (!bitems.empty()) {
+                    pt.mark(kPfDequant, cs);
+                    mmq::gather_r1q2_batch(bitems.data(), (int) bitems.size(), N, 640, cs);
+                    bitems.clear();
+                }
+                int rel = -1;
+                for (int i = 0; i < bn; ++i)
+                    if (bslots[i] != bcur) rel = bslots[i];
+                if (rel >= 0) {
+                    cudaEventRecord(m.used[rel], cs);
+                    for (int i = 0; i < bn; ++i)
+                        if (bslots[i] != bcur) m.used_of[bslots[i]] = rel;
+                }
+                const bool keep = bcur >= 0 && bn > 0;
+                bn = 0;
+                if (keep) bslots[bn++] = bcur;
+            };
+            auto launch = [&](size_t g2) -> bool {
+                const Grp& gp = grps[g2];
+                const int c = cls_of(ents[gp.j0].e);
+                if (c < 0 || (size_t) c >= cls.size() || c >= mpl.classes_max) {
+                    err = "prefill (layer-major): a mixed expert's class is out of range";
+                    return false;
+                }
+                const auto& fe = cls[(size_t) c];
+                const size_t gub = mmq::matrix_bytes(fe.gu_type, 1280, N), db = mmq::matrix_bytes(fe.d_type, N, 640);
+                uint8_t* bgu = m.grp_gu + (size_t) c * grp_gu_region(mpl);
+                uint8_t* bd = m.grp_d + (size_t) c * grp_d_region(mpl);
+                const int ngx = (int) (gp.j1 - gp.j0);
+                pt.mark(kPfGemmGU, cs);
+                cudaMemsetAsync(bgu + (size_t) ngx * gub, 0, MMQ_TAIL, cs);
+                cudaMemsetAsync(bd + (size_t) ngx * db, 0, MMQ_TAIL, cs);
+                mmq::quantize(lb.mixed, d_row_tok + gp.r0, m.Xq, mmq_gt, N, N, gp.nr, cs);   // (APR: rotated above)
+                mmq::Product gu;
+                gu.w = bgu; gu.type = fe.gu_type; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = gub;
+                gu.n = ngx; gu.xq = m.Xq; gu.bounds = d_bounds + gp.b_at; gu.ids = m.ids_identity;
+                gu.total_rows = gp.nr; gu.max_rows = gp.maxr; gu.dst = m.GU; gu.ld_dst = 1280;
+                m.mmq_ctx->run(gu, cs);
+                mmq::swiglu(m.GU, m.H, gp.nr, 640, false, cs);
+                if (had_d) strata::kernels::hadamard_rows(m.H, m.H, gp.nr, 640, had_block, had_sh, cs);
+                pt.mark(kPfGemmD, cs);
+                mmq::quantize(m.H, nullptr, m.Hq, fe.d_type, 640, 640, gp.nr, cs, m.Hscale);
+                mmq::Product dn;
+                dn.w = bd; dn.type = fe.d_type; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = db;
+                dn.n = ngx; dn.xq = m.Hq; dn.bounds = d_bounds + gp.b_at; dn.ids = m.ids_identity;
+                dn.total_rows = gp.nr; dn.max_rows = gp.maxr; dn.dst = m.Dm; dn.ld_dst = N;
+                m.mmq_ctx->run(dn, cs);
+                pt.mark(kPfCombine, cs);
+                moe_scatter_add(m.Dm, d_u_tok + gp.u_at, d_u_off + gp.uo_at, d_u_rows + gp.r0, d_u_w + gp.r0, gp.nu,
+                                lb.acc, cs);
+                ++lm_groups;
+                ++stats_.ql_mixed_groups;
+                ++launched;
+                core::progress_beat();
+                return true;
+            };
+            for (size_t uu = 0; uu < uniq.size(); ++uu) {
+                while (staged < uniq.size() && staged <= uu + ahead) {
+                    if (!stage_one(staged)) return false;
+                    ++staged;
+                }
+                const int32_t e = uniq[uu];
+                if (stage_of[uu] < 0) {
+                    blob_dev = m.cache->device_slot(m.host_res[(size_t) l * NE + e]);
+                    ++stats_.experts_resident;
+                    ++lm_resident;
+                } else if (lm_batch) {   // (waited for by the batch's gather)
+                    blob_dev = m.stage_dev[stage_of[uu]];
+                    bcur = stage_of[uu];
+                    bslots[bn++] = bcur;
+                } else {
+                    pt.mark(kPfWaitCopy, cs);
+                    cudaStreamWaitEvent(cs, m.copied[stage_of[uu]], 0);
+                    blob_dev = m.stage_dev[stage_of[uu]];
+                }
+                const int c = cls_of(e);
+                if (c < 0 || (size_t) c >= cls.size() || c >= mpl.classes_max || efirst[(size_t) e] < 0) {
+                    err = "prefill (layer-major): a mixed expert's class or rows are out of range";
+                    return false;
+                }
+                const auto& fe = lay.fmt_of(l, e);   // = cls[c]
+                const size_t gub = mmq::matrix_bytes(fe.gu_type, 1280, N), db = mmq::matrix_bytes(fe.d_type, N, 640);
+                uint8_t* bgu = m.grp_gu + (size_t) c * grp_gu_region(mpl);
+                uint8_t* bd = m.grp_d + (size_t) c * grp_d_region(mpl);
+                if (!lm_batch) pt.mark(kPfDequant, cs);
+                for (int32_t j = efirst[(size_t) e]; j <= elast[(size_t) e]; ++j) {   // its entries (more than one past G rows)
+                    const int32_t g2 = grp_of_ent[(size_t) j];
+                    const size_t q = (size_t) j - grps[(size_t) g2].j0;
+                    if (lm_batch) {   // QuantLab pf-smooth: into the batch (gathered by bflush)
+                        mmq::R1q2Item it;
+                        it.blob = blob_dev;
+                        it.kg = ql_tq_kbits(fe.gu_type);
+                        it.kd = ql_tq_kbits(fe.d_type);
+                        it.up_off = fe.up_off;
+                        it.down_off = fe.down_off;
+                        it.sc_off = fe.sc_off;
+                        it.p2 = fe.p2;
+                        it.gu_dst = bgu + q * gub;
+                        it.d_dst = bd + q * db;
+                        it.zero_bytes = 0;
+                        bitems.push_back(it);
+                    } else if (fe.r1q2) {   // QuantLab (10/31): an R1Q2 blob, expanded to the old blocks
+                        mmq::gather_r1q2(blob_dev, ql_tq_kbits(fe.gu_type), ql_tq_kbits(fe.d_type), N, 640, fe.up_off,
+                                         fe.down_off, fe.sc_off, fe.p2, bgu + q * gub, bd + q * db, cs, 0);
+                    } else {
+                        mmq::gather_native(blob_dev, blob_dev + fe.up_off, gub / 2, blob_dev + fe.down_off, db, bgu + q * gub,
+                                           bd + q * db, cs);
+                    }
+                    if (++gfill[(size_t) g2] == (int32_t) (grps[(size_t) g2].j1 - grps[(size_t) g2].j0)) {
+                        if (lm_batch) bflush();   // the group's experts are in before its products
+                        if (!launch((size_t) g2)) return false;
+                    }
+                }
+                if (lm_batch) {   // the expert's entries are in the batch: its slot goes with the batch's release
+                    bcur = -1;
+                    if (bn >= MMQ_GROUP) bflush();
+                } else if (stage_of[uu] >= 0) {   // every entry of the blob is gathered: its ring slot is free
+                    cudaEventRecord(m.used[stage_of[uu]], cs);
+                    m.used_of[stage_of[uu]] = stage_of[uu];
+                }
+            }
+            if (lm_batch) {
+                bcur = -1;
+                bflush();
+            }
+            if (launched != grps.size()) {
+                err = "prefill (layer-major): a mixed layer's class group was left unlaunched";
+                return false;
+            }
+            ms_experts += ms_since(th0);
+            return true;
+        }
         for (size_t j = 0; j < ents.size(); ++j) {
             const int32_t e = ents[j].e;
             if (j == 0 || ents[j - 1].e != e) {   // the next expert: staged ahead, waited for, its blob located
@@ -6915,9 +7326,11 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
                 // this entry's rows (group-relative offset o): FP16 inputs, gate/up, SwiGLU, down
                 const int64_t o = ents[j].r0 - gp.r0, nr = ents[j].nr;
                 gather_rows16(lb.mixed_h, d_row_tok + ents[j].r0, m.Xs + o * N, nr, N, cs);
+                if (had_gu) strata::kernels::hadamard_rows_f16(m.Xs + o * N, nr, N, had_block, had_sx, cs);   // pf-smooth: APR
                 pt.mark(kPfGemmGU, cs);
                 m.gemm.f16(m.Xs + o * N, m.dq_gu[dq], m.GU + o * 1280, nr, 1280, N);
                 swiglu_interleaved(m.GU + o * 1280, m.Hh + o * 640, nr, cs);
+                if (had_d) strata::kernels::hadamard_rows_f16(m.Hh + o * 640, nr, 640, had_block, had_sh, cs);   // pf-smooth: APR
                 pt.mark(kPfGemmD, cs);
                 m.gemm.f16(m.Hh + o * 640, m.dq_d[dq], m.Dm + o * N, nr, N, 640);
                 if (j + 1 < gp.j1) continue;
@@ -6954,6 +7367,7 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
             gu.total_rows = gp.nr; gu.max_rows = gp.maxr; gu.dst = m.GU; gu.ld_dst = 1280;
             m.mmq_ctx->run(gu, cs);
             mmq::swiglu(m.GU, m.H, gp.nr, 640, !lay.native, cs);
+            if (had_d) strata::kernels::hadamard_rows(m.H, m.H, gp.nr, 640, had_block, had_sh, cs);   // pf-smooth: APR
             pt.mark(kPfGemmD, cs);
             mmq::quantize(m.H, nullptr, m.Hq, mmq_dt, 640, 640, gp.nr, cs);
             mmq::Product dn;
@@ -7423,12 +7837,12 @@ bool Prefill::run_layer_major(const int64_t* tokens, int64_t n, int64_t pos0, st
         return false;
     }
     stats_.ms_total += ms_since(t_start);
-    std::fprintf(stderr, "strata prefill: layer-major (layers %lld..%lld): %lld tokens in %lld super-chunk(s) of up to %lld (R in %s, %lld MiB VRAM free before), "
+    std::fprintf(stderr, "strata prefill: layer-major (layers %lld..%lld): %lld tokens in %lld super-chunk(s) of up to %lld (R in %s, %lld MiB %s), "
                          "%lld expert blobs streamed (%.1f MB), %lld resident, %lld expert groups (%lld on the FP16 path); %.0f ms (host: "
                          "enqueueing the attention halves %.0f, the experts %.0f: waiting for the attention halves "
                          "%.0f, the routing tables %.0f)\n",
                  (long long) LB, (long long) LE, (long long) n, (long long) lm_supers, (long long) S,
-                 lb.r_dev ? "VRAM" : "pinned RAM", (long long) lb.free_mib,
+                 lb.r_dev ? "VRAM" : "pinned RAM", (long long) lb.free_mib, lb.loan ? "of the loan (QuantLab pf-smooth)" : "VRAM free before",
                  (long long) lm_streamed, (double) lm_bytes / 1e6, (long long) lm_resident, (long long) lm_groups,
                  (long long) lm_groups_f16, ms_since(t_start), ms_attn, ms_experts, ms_wait_a, ms_host_tables);
     if (pt.on) {
@@ -7503,9 +7917,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
 #endif
     // layer-major prefill: STRATA_PREFILL_LAYER_MAJOR=1 / 0 win; unset, it is on for a CUDA layer split (sm120_series.hpp
     // prefill_layer_major_default; STRATA_DEFAULTS=026 and a HIP build leave it off)
+    // QuantLab pf-smooth (11/17): or the serve path's auto walk (set_layer_major_auto: one GPU, a small card's long prompt,
+    // its super-chunk in the request's loan); an explicit STRATA_PREFILL_LAYER_MAJOR=0 keeps it off too
+    const bool lm_auto_on = lm_auto_ && !lm_hip && next_ == nullptr && stage_lb_ == 0 &&
+                            !(lm_env_explicit() && std::atoi(lm_env_text()) == 0);
     if (hand_in_ == nullptr && impl_ &&
-        strata::prefill_layer_major_resolve(lm_env_text(), lm_hip, stage_count(), strata::qwen_defaults_026())) {
-        const bool by_default = !lm_env_explicit();
+        (lm_auto_on ||
+         strata::prefill_layer_major_resolve(lm_env_text(), lm_hip, stage_count(), strata::qwen_defaults_026()))) {
+        const bool by_default = !lm_env_explicit() && !lm_auto_on;
         for (Prefill* p = this; p != nullptr; p = p->next_) p->lm_by_default_ = by_default;
         std::string why;
         if (by_default) {

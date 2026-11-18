@@ -217,7 +217,7 @@ RustXNG をサービスとして常駐させたくない場合は、プラグイ
   config:
     autoStart:
       enabled: true
-      binaryPath: /home/user/.dsh/bin/rustxng   # 空なら $DSH_HOME/bin, ~/.local/bin, PATH
+      binaryPath: /home/you/.dsh/bin/rustxng   # 空なら $DSH_HOME/bin, ~/.local/bin, PATH
       idleMinutes: 60                          # 0 = DSH がプラグインを解放するまで動かす
 ```
 

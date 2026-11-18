@@ -38,14 +38,14 @@ const SyncFps = (() => {
 (() => {
   const root = document.documentElement;
   const mq = window.matchMedia("(hover: hover) and (pointer: fine)");
-  const SEL = ".spinner, .ctx-meter.busy .ctx-busy, .pill.busy .dot, .att-img.loading";
+  const SEL = ".spinner, .pill.busy .dot, .att-img.loading";
   const WATCH_MS = 250;   // 飾りが出たかを見る間隔（出ていない間はこれだけ）
   const FRAME_MS = SyncFps.fxMs;    // 時計の最短の間隔（既定 15 ms＝約 60fps．上の SyncFps で替えられる）
   let raf = 0;
   let watch = 0;
   let list = [];
 
-  const kind = (e) => (e.classList.contains("spinner") || e.classList.contains("ctx-busy") ? "spin"
+  const kind = (e) => (e.classList.contains("spinner") ? "spin"
     : e.classList.contains("dot") ? "pulse" : "fade");
   const shown = () => {
     list = [...document.querySelectorAll(SEL)].filter((e) => e.getClientRects().length);
@@ -68,7 +68,7 @@ const SyncFps = (() => {
         if (!e.isConnected) continue;
         live = true;
         const k = kind(e);
-        if (k === "spin") e.style.transform = `rotate(${((t % (e.classList.contains("spinner") ? 900 : 1100)) / (e.classList.contains("spinner") ? 900 : 1100)) * 360}deg)`;
+        if (k === "spin") e.style.transform = `rotate(${((t % 900) / 900) * 360}deg)`;
         else if (k === "pulse") e.style.opacity = String(0.65 + 0.35 * Math.cos((t / 1200) * 2 * Math.PI));
         else e.style.opacity = String(0.775 + 0.225 * Math.cos((t / 1200) * 2 * Math.PI));
       }

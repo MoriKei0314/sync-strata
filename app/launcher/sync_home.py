@@ -155,6 +155,8 @@ SCHEMA = {
     "update_feed":      ("更新の置き場（フォルダーか URL．auto: 配布物の一覧の値）", str, None),
     # 11/16: 会話の控え（K/V の保存）．大きいので，既定はモデルと同じドライブ．合計に上限（超えたら古い物から消す）
     "sessions_dir":     ("会話の控えの置き場（auto: モデルの置き場と同じドライブの SyncStrata-sessions．モデルが既定の置き場なら SYNC_HOME\\engine-sessions）", str, None),
+    # 11/17: 会話の窓（Tauri の枠）の描き方．枠が settings.json を直接読む（引数 --gpu・環境変数 SYNC_GUI_GPU が先）．次に窓を開くときから効く
+    "gui_gpu":          ("会話の窓を GPU で描くか．auto（既定．Linux は白い窓を避ける設定だけ）・on・off（CPU で描く．decode と GPU を取り合わない．CPU は増える）", _choice("auto", "on", "off"), "auto"),
     "sessions_max_gib": ("会話の控えの合計の上限 GiB（auto: 20 と，そのドライブの空き＋控えの 1 割の小さい方．最低 2）", _num(1, 4096), None),
 }
 
@@ -678,6 +680,105 @@ def dsh_up(s):
     return listening(s["dsh_port"]) and listening(s["relay_port"]) and listening(s["proxy_port"])
 
 
+# ------------------------------------------------------------------ 11/18 W12: 既定の番号がほかのプログラムにふさがれている PC
+# 4 つの番号（エンジン・会話の中継・dsh・会話の画面の中継）それぞれを，起こす前に調べる．自分の物でないプログラムが待ち受けている
+# （または OS が使わせない）なら，空いている番号を選んで settings.json に書き，その番号で続ける．一度選んだ番号は次からも使う
+# （スマホのブックマークが毎回変わらないように）．選んだ番号が自分の物・空きなら何もしない
+PORT_KEYS = ("api_port", "proxy_port", "dsh_port", "relay_port")
+PORT_NAME = {"api_port": "エンジン", "proxy_port": "会話の中継", "dsh_port": "dsh", "relay_port": "会話の画面の中継"}
+PORT_PROC = {"proxy_port": "proxy", "dsh_port": "dsh", "relay_port": "relay"}
+DEFAULT_PORTS = (8080, 8081, 3080, 3081)
+
+
+def strata_health(port, timeout=2):
+    """その番号の /health（鍵なしで答える）が Sync-Strata のエンジンの形か．serve は "service": "strata" を返す
+    （古い版は service が無いので，max_context・images・api_key の 3 つの項目がそろえば同じ物と見る）．
+    llama-server は {"status":"ok"}，Open WebUI は {"status":true} だけなので取り違えない"""
+    try:
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout)
+        if r.status != 200:
+            return False
+        d = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return False
+    return isinstance(d, dict) and (d.get("service") == "strata" or all(k in d for k in ("max_context", "images", "api_key")))
+
+
+def engine_is_ours(port):
+    """自分で起こしたエンジン（procs.json の engine の番号が合い，生きている）か，答えが Sync-Strata のエンジンの形のもの"""
+    rec = procs().get("engine")
+    if rec and alive("engine") and rec.get("port") == port:
+        return True
+    return strata_health(port)
+
+
+def _bindable(port):
+    """127.0.0.1 のその番号を今取れるか（OS が使わせない範囲・別のプログラムの占有は False）"""
+    sk = socket.socket()
+    try:
+        if not OS.IS_WIN:
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sk.bind(("127.0.0.1", int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sk.close()
+
+
+def port_blocked(key, port):
+    """その番号をほかのプログラムが使っているか（自分の物でない待ち受け，または待ち受けは無いが取れない番号）"""
+    if listening(port):
+        ours = engine_is_ours(port) if key == "api_port" else alive(PORT_PROC[key])
+        return not ours
+    if key != "api_port" and alive(PORT_PROC[key]):
+        return False
+    return not _bindable(port)
+
+
+def pick_port(base, avoid):
+    """base の近く（base+1 から順に．既定の 4 つの番号と avoid は避ける）で空いている番号．無ければ OS に聞く"""
+    used = _listen_ports() or set()
+    for p in range(base + 1, min(base + 300, 65535)):
+        if p in avoid or p in used or p in DEFAULT_PORTS:
+            continue
+        if _bindable(p):
+            return p
+    sk = socket.socket()
+    try:
+        sk.bind(("127.0.0.1", 0))
+        return sk.getsockname()[1]
+    finally:
+        sk.close()
+
+
+def ensure_ports(s, say=print, persist=True):
+    """s（effective() の値）の 4 つの番号を調べ，ふさがっている番号は空いている番号に替える（s を直接書き換える）．
+    替えた番号は persist なら settings.json に書く（--dry は書かない）．替えた {設定名: 新しい番号} を返す．
+    SYNC_USE_DSH_TASK=1（作者の PC の常駐の dsh に任せる）のときは，dsh・中継の 3 つは見ない"""
+    keys = ("api_port",) if os.environ.get("SYNC_USE_DSH_TASK") == "1" else PORT_KEYS
+    taken = {int(s[k]) for k in PORT_KEYS}
+    changed = {}
+    for k in keys:
+        p = int(s[k])
+        dup = [o for o in PORT_KEYS if o != k and int(s[o]) == p and PORT_KEYS.index(o) < PORT_KEYS.index(k)]   # 設定で 2 つが同じ番号
+        if not dup and not port_blocked(k, p):
+            continue
+        n = pick_port(p, taken)
+        taken.add(n)
+        s[k] = n
+        changed[k] = n
+        say(f"  番号 {p}（{PORT_NAME[k]}）はほかのプログラムが使っているので，{n} にしました．" if not dup
+            else f"  番号 {p}（{PORT_NAME[k]}）がほかの部品と重なっているので，{n} にしました．")
+    if persist:
+        for k, n in changed.items():
+            try:
+                settings_set(k, str(n))
+            except (OSError, ValueError, KeyError):
+                pass
+    return changed
+
+
 DSH_ERROR = None      # 11/16: start_dsh が起こせなかった理由（up の JSON の error に出す）
 PORT_LABEL = {"proxy": ("会話の中継", "proxy_port"), "dsh": ("dsh", "dsh_port"), "relay": ("会話の画面の中継", "relay_port")}
 
@@ -689,6 +790,7 @@ def start_dsh(s, say=print):
     番号を自分で起こしていない別のプログラムが使っていれば，黙ってつながずに理由を出して止まる"""
     global DSH_ERROR
     DSH_ERROR = None
+    ensure_ports(s, say)      # 11/18 W12: ふさがっている番号は空いている番号に替えて続ける（s を書き換える）
     ports = {"proxy": s["proxy_port"], "dsh": s["dsh_port"], "relay": s["relay_port"]}
     use_task = os.environ.get("SYNC_USE_DSH_TASK") == "1"
     if not use_task:
@@ -717,6 +819,8 @@ def start_dsh(s, say=print):
         sd, cap, low = sessions_plan(s)
         e = dict(env, PROXY_PORT=str(s["proxy_port"]), STRATA_URL=f"http://127.0.0.1:{s['api_port']}",
                  SESSION_DIR=sd, PROXY_LOG=os.path.join(logs, "session-proxy.log"), MAX_GIB=f"{cap:.2f}",
+                 HEAD_MODEL_NAME_FILE=path("run", "head-model-name.txt"),   # 11/18 W11: 起動の道具が sync up のたびに書く（中継が頼みごとに読む．モデルを替えても名前が追いつく）
+                 WARM_HEAD_FILE=path("run", "warm-head.json"),    # 11/18 W11: dsh の頭の記録（起動の道具の温めが読む．会話の中身は入らない）
                  **({"MIN_SAVE_TOKENS": "1000000000"} if low else {}))   # 11/16: エンジンの slot_save_path と同じ置き場・上限・空きが少なければ書かない
         if low:
             say(f"  {sd} のドライブの空きが {LOW_FREE_GIB:.0f} GiB 未満なので，会話の控えは書きません")

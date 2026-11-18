@@ -244,7 +244,7 @@ def deny_patterns(extra_file, sources):
     home = os.environ.get('USERPROFILE')
     if home:
         pats.add(home); pats.add(home.replace('\\', '/'))
-    for c in sources['components']:      # 作業場の道のり（<作業場> のような，元の置き場の頭 2 段）
+    for c in sources['components']:      # 作業場の道のり（E:\Work のような，元の置き場の頭 2 段）
         for fr in c['from']:
             p = os.path.normpath(os.path.join(sources['_base'], fr['src']))
             parts = p.split(os.sep)
