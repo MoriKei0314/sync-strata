@@ -154,7 +154,8 @@ Quality (distance from the original model) is on each model page. Sync-XS qualit
 - Images are read on the CPU and take a dozen seconds or so each (every release includes image reading).
 - Apps that use a lot of GPU or memory bandwidth slow it down a lot (CPU contention is handled automatically). `sync doctor` shows which apps are using them.
 - Running on the GPU that also drives your display leaves less VRAM.
-- In a test on an unsupported integrated Radeon (the iGPU of a Ryzen 7000 CPU), some replies came out as all zeros. Whether this also happens on Strix Halo (experimental; it also shares memory with the CPU) is not checked.
+- On Radeon (the HIP engine), a test on an unsupported integrated Radeon (Ryzen 7000 series) showed that GPU work can run out of order and corrupt replies (for example, all zeros). Until this is fixed, Sync-Strata turns on a setting that waits for each GPU step to finish (`AMD_SERIALIZE_KERNEL=2`) on Radeon by default; reading prompts can be a little slower. Whether this happens on discrete Radeon cards and Strix Halo is not checked.
+- Do not use `STRATA_HIP_PROMPT_F16=1`, which the engine suggests on Radeon: with the Sync models it corrupts replies.
 - Part of the calibration text was made from the author's own chat logs (see below).
 
 ## About calibration

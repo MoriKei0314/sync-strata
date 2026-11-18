@@ -453,6 +453,11 @@ def make_config(pick, engine, extra_env, context=None):
             env.setdefault("STRATA_DENSE_F32", "1")
     except Exception:
         pass
+    if c.get("backend") == "hip":   # 11/19: Radeon（HIP・ROCm）は GPU の処理の順番の競合がある（内蔵 Radeon gfx1036 で返事が全部 0・本番の道は
+        # メモリー違反で落ちる．11/19 の Linux メイン機での切り分け）．カーネルを投げた後に終わるまで待つ
+        # AMD_SERIALIZE_KERNEL=2 で毎回同じ返事になり，0・落ちが消えた（prefill +4〜5%，decode は下書きの当たりが上がり速くなった）．
+        # 直すまでの避け方として既定に．--env AMD_SERIALIZE_KERNEL=0 で外せる
+        env.setdefault("AMD_SERIALIZE_KERNEL", "2")
     for kv in extra_env:
         k, _, v = kv.partition("=")
         env[k] = v

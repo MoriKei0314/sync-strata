@@ -115,7 +115,7 @@
   {
    "id": "launcher",
    "name": "起動の道具（sync.py）",
-   "version": "0.1.1",
+   "version": "0.1.1-1119",
    "optional": true,
    "from": [
     {
