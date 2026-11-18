@@ -1,5 +1,5 @@
 {
- "note": "Template. Replace <your-path> with where the parts live on your build machine. Original note: 部品の元の置き場（作者の PC．組み立てる build_pack.py が読む．配布物には入らない）．版を上げたら version を直す．shell・launcher・chat は係 T・S の物ができたら置き場を直す（optional: まだ無ければ飛ばす）．",
+ "note": "Template. Replace <your-path> with where the parts live on your build machine. Original note: 部品の元の置き場（作者の PC．組み立てる build_pack.py が読む．配布物には入らない）．版を上げたら version を直す．shell・launcher・chat はS の物ができたら置き場を直す（optional: まだ無ければ飛ばす）．",
  "release": "0.1.1",
  "update_feed": "https://github.com/{github_account}/sync-strata/releases/latest/download",
  "shortcuts": [
@@ -54,7 +54,7 @@
     }
    ],
    "os": "windows",
-   "note": "11/17 H（strata-engine2-desktop）: 0.1.1 で 1 本で動く更新の道具（update.cmd・update.sh．pack/src/update/update_core.py を tools/make_update_tools.py で包んだ物）を足し，配布の道具は OS ごとの一覧の名前・別の OS の一覧を断る・gh での取り寄せ・入れた先の update の入口を pack の物に，を入れた．元は sources.json.bak-1117-h"
+   "note": "0.1.1 で 1 本で動く更新の道具（update.cmd・update.sh．pack/src/update/update_core.py を tools/make_update_tools.py で包んだ物）を足し，配布の道具は OS ごとの一覧の名前・別の OS の一覧を断る・gh での取り寄せ・入れた先の update の入口を pack の物に，を入れた．"
   },
   {
    "id": "pack",
@@ -80,7 +80,7 @@
     "setup.sh",
     "update.sh"
    ],
-   "note": "11/17 H（strata-engine2-desktop）: 0.1.1 で 1 本で動く更新の道具（update.cmd・update.sh．pack/src/update/update_core.py を tools/make_update_tools.py で包んだ物）を足し，配布の道具は OS ごとの一覧の名前・別の OS の一覧を断る・gh での取り寄せ・入れた先の update の入口を pack の物に，を入れた．元は sources.json.bak-1117-h"
+   "note": "0.1.1 で 1 本で動く更新の道具（update.cmd・update.sh．pack/src/update/update_core.py を tools/make_update_tools.py で包んだ物）を足し，配布の道具は OS ごとの一覧の名前・別の OS の一覧を断る・gh での取り寄せ・入れた先の update の入口を pack の物に，を入れた．"
   },
   {
    "id": "shell",
@@ -130,7 +130,7 @@
     ".*",
     "*.bak-*"
    ],
-   "note": "11/15 S2: 作業の置き場の写し（元の tools/night/launcher は別の係の試験用）．layout.dev.json は作者の PC の並びなので入れない",
+   "note": "作業の置き場の写し（元の tools/night/launcher は別の係の試験用）．layout.dev.json は作者の PC の並びなので入れない",
    "exec": [
     "sync.sh"
    ]
@@ -171,7 +171,7 @@
      "src": "<your-path>/chat-pack/version.json"
     }
    ],
-   "note": "11/15 S2: 画面（public）とダウンロードの道具は本番そのまま．中継・会話の中継・モデルの一覧は s2/make_chat_pack.py が本番から作った写し（組む前に流す．--check で本番が変わったかを見る）",
+   "note": "画面（public）とダウンロードの道具は本番そのまま．中継・会話の中継・モデルの一覧は s2/make_chat_pack.py が本番から作った写し（組む前に流す．--check で本番が変わったかを見る）",
    "exclude": [
     "public/aurora*"
    ]
@@ -193,7 +193,7 @@
      "dst": "data"
     }
    ],
-   "note": "11/15 夜 S2: 世代ごとの exe と DLL は engine-<種類> に分けた",
+   "note": "世代ごとの exe と DLL は engine-<種類> に分けた",
    "os": "windows"
   },
   {
@@ -201,7 +201,7 @@
    "os": "linux",
    "name": "エンジンの共通の部分（serve と学習なしの表．Linux）",
    "version": "0.2.7-linux1118r",
-   "note": "11/17 I-5（strata-engine2-desktop）: 0.1.0-1115 の Linux の zip にこの部品が無く sync up が起きなかった（kit-linux-1115r に serve-py・bench が無く optional で黙って飛んだ）．serve-py と expert-profile-upstream.bin は Windows の engine と同じ kit-win-1116a（Linux の実機で起動を確かめた．linux-main-check-1116.md 3b），BUILD.json は kit-linux-1115r．optional は外した（元が無ければ組み立てが止まる）．版は Linux 側の試作（engine-fix-1116，files_sha256 398ed4e6…）と同じ中身なので変えない．元は sources.json.bak-1117-i5",
+   "note": "0.1.0-1115 の Linux の zip にこの部品が無く sync up が起きなかった（kit-linux-1115r に serve-py・bench が無く optional で黙って飛んだ）．serve-py と expert-profile-upstream.bin は Windows の engine と同じ kit-win-1116a（Linux の実機で起動を確かめた．linux-main-check-1116.md 3b），BUILD.json は kit-linux-1115r．optional は外した（元が無ければ組み立てが止まる）．版は Linux 側の試作（engine-fix-1116，files_sha256 398ed4e6…）と同じ中身なので変えない．",
    "from": [
     {
      "src": "<your-path>/QuantLab/release/serve-py-1118r2",
@@ -303,7 +303,7 @@
    ],
    "optional": true,
    "os": "windows",
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
   },
   {
    "id": "engine-hip-rx9070",
@@ -328,7 +328,7 @@
      "dst": ""
     }
    ],
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
   },
   {
    "id": "engine-hip-rdna3",
@@ -348,7 +348,7 @@
    ],
    "optional": true,
    "os": "windows",
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
   },
   {
    "id": "engine-hip-rdna3",
@@ -373,7 +373,7 @@
      "dst": ""
     }
    ],
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
   },
   {
    "id": "engine-hip-rdna2",
@@ -393,7 +393,7 @@
    ],
    "optional": true,
    "os": "windows",
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・strata-vision.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，bin/tuning（rdna2 は無し））．キットの BUILD.json も入れる．11/16 11:4x: キットの直下の tuning は無い（bin の中）ので別の項目を外した"
   },
   {
    "id": "engine-hip-rdna2",
@@ -418,7 +418,7 @@
      "dst": ""
     }
    ],
-   "note": "11/16: HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
+   "note": "HIP の形（bin に strata.exe・strata-device.exe・HIP の DLL，bin/rocm/bin＝lib_dirs，tuning）．キットの BUILD.json も入れる"
   },
   {
    "id": "python",
@@ -433,7 +433,7 @@
     "Lib/site-packages/*.dist-info/direct_url.json",
     "Scripts/*.exe"
    ],
-   "note": "11/15 S2: Scripts の *.exe（pip などの入口）は組んだ PC の python.exe の道のりを中に持ち，入れた先では動かないので入れない（部品は python -m で使う）",
+   "note": "Scripts の *.exe（pip などの入口）は組んだ PC の python.exe の道のりを中に持ち，入れた先では動かないので入れない（部品は python -m で使う）",
    "os": "windows"
   },
   {
@@ -549,7 +549,7 @@
      "src": "<your-path>/publish/package-licenses"
     }
    ],
-   "note": "11/15 夜: 文書の係がまとめる（入れた先は app\\licenses\\）．元の置き場ができるまでは optional で飛ばす"
+   "note": "文書の係がまとめる（入れた先は app\\licenses\\）．元の置き場ができるまでは optional で飛ばす"
   }
  ],
  "github_account": "hiruhiru2005",
