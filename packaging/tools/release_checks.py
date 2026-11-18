@@ -108,7 +108,7 @@ def update_sim(a):
     nm = load_manifests(new_dist).get('windows-x64')
     if not nm:
         print('新しい配布物の目録が見つからない:', new_dist); return 1
-    work = a.work or tempfile.mkdtemp(prefix='sync-update-sim-', dir='E:\\')
+    work = a.work or tempfile.mkdtemp(prefix='sync-update-sim-')
     app, home, models = os.path.join(work, 'app'), os.path.join(work, 'home'), os.path.join(work, 'models')
     os.makedirs(models, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('SYNC_', 'DSH_', 'STRATA_'))}
