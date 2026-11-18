@@ -6,6 +6,7 @@ The `sync` commands let you do from a terminal what the app does, and give other
 
 - Windows: `sync ...` (the command in the Start menu, or `sync.cmd` in the app's folder).
 - Linux: `./sync.sh ...` (`sync.sh` in the app's folder). It does the same as `sync` on Windows.
+- If you chose the install folder with `-AppDir` (Linux: `--app-dir`), the command is in `app\launcher\` under it (Linux: `app/launcher/`).
 - `sync` with no arguments shows a small numbered menu (start, API only, stop, status, PC check, help).
 - `sync help` (`-h`, `--help`) prints the list too.
 - Add `--lang en|ja` to any command to choose the language of the output (default: Japanese; English on a text-only console, `TERM=linux`; you can also set the environment variable `SYNC_LANG`).

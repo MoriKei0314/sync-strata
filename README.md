@@ -154,11 +154,22 @@ Quality (distance from the original model) is on each model page. Sync-XS qualit
 - Images are read on the CPU and take a dozen seconds or so each (every release includes image reading).
 - Apps that use a lot of GPU or memory bandwidth slow it down a lot (CPU contention is handled automatically). `sync doctor` shows which apps are using them.
 - Running on the GPU that also drives your display leaves less VRAM.
+- In a test on an unsupported integrated Radeon (the iGPU of a Ryzen 7000 CPU), some replies came out as all zeros. Whether this also happens on Strix Halo (experimental; it also shares memory with the CPU) is not checked.
 - Part of the calibration text was made from the author's own chat logs (see below).
 
 ## About calibration
 
 The models were calibrated on public text (code, documentation, encyclopedia articles, several languages, agent traces) and on some text made from the author's own chat logs. The calibration text is not distributed.
+
+## Support (optional)
+
+Sync-Strata is free and will stay free. If you would like to support it, there is a donation page ([Ko-fi](https://ko-fi.com/hiruhiru2005)).
+
+- A donation is a thank-you only. You get nothing in return: no perks, no priority support, no feature promises.
+- Development and support are the same whether or not you donate.
+- Donations are meant for development and learning costs, but there is no promise on how they are used.
+- Donations are generally non-refundable.
+- Donating does not change the license terms of the app, the models or any component (including the Qwen Community License 1.0).
 
 ## Credits
 
