@@ -462,6 +462,18 @@ def make_config(pick, engine, extra_env, context=None):
         # 下げ続けていた）．自動の調整（STRATA_QL_PCIE_AUTO，0.199〜1.0）はそのまま働くので，始める値だけ 0.7 から 0.4 に下げる
         if "--pcie-frac" in args and args[args.index("--pcie-frac") + 1] == "0.7":
             setarg("--pcie-frac", "0.4")
+        # rx6800-gfx1030 (Phase 1 実測, 2026-11-19): RDNA2 単体 (gfx1030, RX 6800) では --pcie-mode dma の
+        # verify ウィンドウの完了フラグ待ち (A/B/M) が WDDM で立たず, 生成が全て "verify: layer N never rang"
+        # で死ぬ (上流 #267 と同系統). kernel 経路はその待ちを使わず実動作した (Sync-S で decode 22-25 tok/s,
+        # 日本語・ツール呼び出し確認済み) ため, RDNA2 単体 (gfx103x で内蔵でないもの) では既定を kernel にする.
+        # 他の世代 (RDNA3/4) は dma のまま変えない. --env では変えられない引数なので, 戻すときはこの分岐を外す.
+        try:
+            import sync_env as _SE3
+            _dev = _SE3.hip_picked_device(engine, c.get("lib_dirs"))
+            if _dev and str(_dev.get("arch", "")).startswith("gfx103") and not _dev.get("integrated"):
+                setarg("--pcie-mode", "kernel")
+        except Exception:
+            pass
         # 11/19 0.1.2（本人の判断，確認箱）: RAM の専門家の置き場の取り方を起動時に測る STRATA_HIP_ARENA=auto（エンジン d278210e）は，
         # 内蔵 Radeon では Windows・Linux とも古い中身の試験が判定できず切り替わらず，起動が 6〜10 秒延びた．効き目の見込みが立つまで
         # 既定は今までどおりの取り方（coherent）．--env STRATA_HIP_ARENA=auto で試せる

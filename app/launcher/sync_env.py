@@ -394,11 +394,11 @@ def pick_hip_ordinal(devices):
     return max(pool, key=lambda d: (round(d["vram_gb"]), -d["index"]))["index"]
 
 
-def hip_ordinal(engine_exe, lib_dirs=None):
-    """キットの strata-device --list-devices を流して，使う HIP の装置の番号を返す（流せない・出力が読めないときは None）．軽い（GPU の計算はしない）"""
+def hip_devices(engine_exe, lib_dirs=None):
+    """キットの strata-device --list-devices を流して，HIP の装置の一覧を返す（流せない・出力が読めないときは []）．軽い（GPU の計算はしない）"""
     probe = os.path.join(os.path.dirname(engine_exe), "strata-device.exe" if os.name == "nt" else "strata-device")
     if not os.path.isfile(probe):
-        return None
+        return []
     env = dict(os.environ)
     var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
     dirs = [d for d in (lib_dirs or []) if os.path.isdir(d)]
@@ -408,8 +408,22 @@ def hip_ordinal(engine_exe, lib_dirs=None):
         r = subprocess.run([probe, "--list-devices"], capture_output=True, text=True, timeout=60, cwd=os.path.dirname(probe), env=env,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_hip_devices(r.stdout) if r.returncode == 0 else []
+
+
+def hip_ordinal(engine_exe, lib_dirs=None):
+    """使う HIP の装置の番号を返す（選べないときは None）"""
+    return pick_hip_ordinal(hip_devices(engine_exe, lib_dirs))
+
+
+def hip_picked_device(engine_exe, lib_dirs=None):
+    """使う HIP の装置の辞書（arch・integrated 等）を返す（選べないときは None）。rx6800-gfx1030: --pcie-mode の既定切替の判定に使う"""
+    devs = hip_devices(engine_exe, lib_dirs)
+    o = pick_hip_ordinal(devs)
+    if o is None:
         return None
-    return pick_hip_ordinal(parse_hip_devices(r.stdout)) if r.returncode == 0 else None
+    return next((d for d in devs if d["index"] == o), None)
 
 
 def _min_vram_gib():
