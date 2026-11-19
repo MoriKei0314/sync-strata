@@ -1,6 +1,6 @@
 {
  "note": "Template. Replace <your-path> with where the parts live on your build machine. Original note: 部品の元の置き場（作者の PC．組み立てる build_pack.py が読む．配布物には入らない）．版を上げたら version を直す．shell・launcher・chat はS の物ができたら置き場を直す（optional: まだ無ければ飛ばす）．",
- "release": "0.1.1",
+ "release": "0.1.2",
  "update_feed": "https://github.com/{github_account}/sync-strata/releases/latest/download",
  "shortcuts": [
   {
@@ -38,7 +38,7 @@
   {
    "id": "pack",
    "name": "配布の道具（setup・update・uninstall と dsh の設定のひな形）",
-   "version": "0.1.1",
+   "version": "0.1.2",
    "from": [
     {
      "src": "src/pack-component"
@@ -60,7 +60,7 @@
    "id": "pack",
    "os": "linux",
    "name": "配布の道具（setup・update・uninstall と dsh の設定のひな形．Linux）",
-   "version": "0.1.1",
+   "version": "0.1.2",
    "from": [
     {
      "src": "src/pack-component"
@@ -115,7 +115,7 @@
   {
    "id": "launcher",
    "name": "起動の道具（sync.py）",
-   "version": "0.1.1",
+   "version": "0.1.2",
    "optional": true,
    "from": [
     {
@@ -138,7 +138,7 @@
   {
    "id": "chat",
    "name": "会話の画面と中継",
-   "version": "0.1.1",
+   "version": "0.1.2",
    "optional": true,
    "from": [
     {
@@ -288,16 +288,16 @@
   {
    "id": "engine-hip-rx9070",
    "name": "エンジン（Radeon RX 9000．試験的）",
-   "version": "0.2.7-win1118r3",
+   "version": "0.2.7-win1119r2",
    "variant": "hip-rx9070",
    "main_zip": false,
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rx9070/bin",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rx9070/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rx9070/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rx9070/BUILD.json",
      "dst": ""
     }
    ],
@@ -309,7 +309,7 @@
    "id": "engine-hip-rx9070",
    "os": "linux",
    "name": "エンジン（Radeon RX 9000．試験的．Linux）",
-   "version": "0.2.7-linux1118r",
+   "version": "0.2.7-linux1119r2",
    "variant": "hip-rx9070",
    "main_zip": false,
    "optional": true,
@@ -320,11 +320,11 @@
    ],
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rx9070/bin",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rx9070/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rx9070/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rx9070/BUILD.json",
      "dst": ""
     }
    ],
@@ -333,16 +333,16 @@
   {
    "id": "engine-hip-rdna3",
    "name": "エンジン（Radeon RX 7000．試験的）",
-   "version": "0.2.7-win1118r3",
+   "version": "0.2.7-win1119r2",
    "variant": "hip-rdna3",
    "main_zip": false,
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rdna3/bin",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rdna3/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rdna3/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rdna3/BUILD.json",
      "dst": ""
     }
    ],
@@ -354,7 +354,7 @@
    "id": "engine-hip-rdna3",
    "os": "linux",
    "name": "エンジン（Radeon RX 7000．試験的．Linux）",
-   "version": "0.2.7-linux1118r",
+   "version": "0.2.7-linux1119r2",
    "variant": "hip-rdna3",
    "main_zip": false,
    "optional": true,
@@ -365,11 +365,11 @@
    ],
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rdna3/bin",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rdna3/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rdna3/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rdna3/BUILD.json",
      "dst": ""
     }
    ],
@@ -378,16 +378,16 @@
   {
    "id": "engine-hip-rdna2",
    "name": "エンジン（Radeon RX 6000．試験的）",
-   "version": "0.2.7-win1118r3",
+   "version": "0.2.7-win1119r2",
    "variant": "hip-rdna2",
    "main_zip": false,
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rdna2/bin",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rdna2/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-win-1118r3-hip-rdna2/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-win-1119r2-hip-rdna2/BUILD.json",
      "dst": ""
     }
    ],
@@ -399,7 +399,7 @@
    "id": "engine-hip-rdna2",
    "os": "linux",
    "name": "エンジン（Radeon RX 6000．試験的．Linux）",
-   "version": "0.2.7-linux1118r",
+   "version": "0.2.7-linux1119r2",
    "variant": "hip-rdna2",
    "main_zip": false,
    "optional": true,
@@ -410,11 +410,11 @@
    ],
    "from": [
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rdna2/bin",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rdna2/bin",
      "dst": "bin"
     },
     {
-     "src": "<your-path>/QuantLab/release/kit-linux-1118r-hip-rdna2/BUILD.json",
+     "src": "<your-path>/QuantLab/release/kit-linux-1119r2-hip-rdna2/BUILD.json",
      "dst": ""
     }
    ],

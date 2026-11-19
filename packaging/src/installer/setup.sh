@@ -166,7 +166,7 @@ tx() {
     env_vram_low) E='The GPU has only %s GB of memory, so it may be slow (12 GB or more is recommended).'; J='GPU のメモリが %s GB と少ないため、遅くなることがあります（12 GB 以上を推奨）。' ;;
     env_vram_unknown) E='The amount of GPU memory could not be read. Settings will be on the safe side.'; J='GPU のメモリの量を読めませんでした。設定は控えめにします。' ;;
     env_ram_low) E='This PC has only %s GB of memory, so it may be slow (32 GB or more is recommended).'; J='PC のメモリが %s GB と少ないため、遅くなることがあります（32 GB 以上を推奨）。' ;;
-    env_no_avx512) E='This CPU has no AVX-512. It works, but expect it to be about 15-30%% slower.'; J='この CPU は AVX-512 に対応していません。動きますが、15〜30%% ほど遅くなる見込みです。' ;;
+    env_no_avx512) E='This CPU has no AVX-512. It works, but expect it to be about 10%% slower.'; J='この CPU は AVX-512 に対応していません。動きますが、1 割ほど遅くなる見込みです。' ;;
     env_no_downloader) E='Neither curl nor wget was found. Updates and some engines cannot be downloaded.'; J='curl も wget も見つかりません。更新と一部のエンジンは落とせません。' ;;
     env_launcher_engine) E='The app picks the engine %s (setup picked %s). %s was installed.'; J='アプリはエンジン %s を選びます（setup の見立ては %s）。%s を入れました。' ;;
     env_check_failed) E='Could not check this PC.'; J='この PC を調べられませんでした。' ;;

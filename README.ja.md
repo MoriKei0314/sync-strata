@@ -56,7 +56,7 @@ setup が PC の GPU を調べて、合うエンジンだけをダウンロー�
 2. 端末で `./setup.sh` を実行します。Windows と同じく、足りないコンポーネントだけをインストールします。
 3. アプリのメニュー（デスクトップにも置きます）の **Sync-Strata** を開きます。アプリは `~/.local/share/SyncStrata` にインストールされ、設定と会話は `~/.config/SyncStrata` に保存されます。
 
-細かい選択肢（インストール先・モデルの保存先・修復）は [docs/INSTALL.ja.md](docs/INSTALL.ja.md) にあります。
+細かい選択肢（インストール先・モデルの保存先・修復）は [docs/INSTALL.ja.md](docs/INSTALL.ja.md)、インストールした後に保存先を変える方法は [docs/STORAGE.ja.md](docs/STORAGE.ja.md) にあります。
 
 ## 使い方
 
@@ -154,7 +154,8 @@ Linux（Sync-S・Sync-M・本家の Gyro）の値は測定予定です。
 - 画像は CPU で読むため、1 枚に十数秒かかります（どの配布物にも画像の読み取りが含まれています）。
 - ほかのアプリが GPU やメモリ帯域を多く使うと、速さが大きく落ちます（CPU の取り合いには自動で対処します）。`sync doctor` で、いま使っているアプリが分かります。
 - 画面を描く GPU と同じ GPU で動かすと、使える VRAM が減ります。
-- Radeon（HIP 版）では、GPU の処理の順番がずれて返事が崩れる（すべて 0 になるなど）ことを、対応外の内蔵 Radeon（Ryzen 7000 系）での試しで確認しました。直るまでの避け方として、Radeon では処理ごとに完了を待つ設定（`AMD_SERIALIZE_KERNEL=2`）を既定で有効にしています（prompt の読み込みが少し遅くなることがあります）。単体の Radeon と Strix Halo で起きるかは未確認です。
+- Radeon（HIP 版）では、GPU の処理の順番がずれて返事が崩れる（すべて 0 になるなど）ことを、対応外の内蔵 Radeon（Ryzen 7000 系）の Linux での試しで確認しました。直るまでの避け方として、Linux の Radeon では処理ごとに完了を待つ設定（`AMD_SERIALIZE_KERNEL=2`）を既定で有効にしています（prompt の読み込みが少し遅くなることがあります）。単体の Radeon と Strix Halo で起きるかは未確認です。
+- Windows の Radeon では、上の設定で最初のメッセージのときに止まること、RX 9000 系で GPU のメモリーの仕組み（VMM）が使えず起動できないことが、利用者の方の RX 9070 XT・RX 9060 XT で分かりました。0.1.2 から、Windows の Radeon では `AMD_SERIALIZE_KERNEL=0`・`STRATA_HIP_VMM=0`・`STRATA_QL_DMA_GPUFLAG=0` を既定にしています（作者の手元に Windows で動く Radeon が無いため、作者は試していません）。
 - エンジンが Radeon で勧める `STRATA_HIP_PROMPT_F16=1` は、Sync のモデルでは返事が崩れるため使わないでください。
 - 量子化の較正に使った文章の一部は、作者自身の会話の記録から作りました（下の「較正について」）。
 

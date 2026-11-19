@@ -110,7 +110,7 @@
 | `env_vram_low` | The GPU has only %s GB of memory, so it may be slow (12 GB or more is recommended). | GPU のメモリが %s GB と少ないため、遅くなることがあります（12 GB 以上を推奨）。 |
 | `env_vram_unknown` | The amount of GPU memory could not be read. Settings will be on the safe side. | GPU のメモリの量を読めませんでした。設定は控えめにします。 |
 | `env_ram_low` | This PC has only %s GB of memory, so it may be slow (32 GB or more is recommended). | PC のメモリが %s GB と少ないため、遅くなることがあります（32 GB 以上を推奨）。 |
-| `env_no_avx512` | This CPU has no AVX-512. It works, but expect it to be about 15-30% slower. | この CPU は AVX-512 に対応していません。動きますが、15〜30% ほど遅くなる見込みです。 |
+| `env_no_avx512` | This CPU has no AVX-512. It works, but expect it to be about 10% slower. | この CPU は AVX-512 に対応していません。動きますが、1 割ほど遅くなる見込みです。 |
 | `env_no_downloader` | Neither curl nor wget was found. Updates and some engines cannot be downloaded. | curl も wget も見つかりません。更新と一部のエンジンは落とせません。 |
 | `env_launcher_engine` | The app picks the engine %s (setup picked %s). %s was installed. | アプリはエンジン %s を選びます（setup の見立ては %s）。%s を入れました。 |
 | `env_check_failed` | Could not check this PC. | この PC を調べられませんでした。 |

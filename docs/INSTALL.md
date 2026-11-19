@@ -33,6 +33,7 @@ Sync-Strata is a local LLM app that runs on your own PC's GPU. The chat app (dsh
 If you have a model downloaded for example by a benchmark kit (a layout with `sync-s-sb\` and the like inside `models\`), setup looks for it and uses that place
 **without downloading again** (it searches next to the unzipped zip, up to two levels down from the drive root, and inside your user folder).
 If it is not found, or you want to use another place, point to it, for example `setup.cmd -ModelsDir <models folder>`.
+To move the app or the models after installing, see [STORAGE.md](STORAGE.md).
 
 ## 3. Update
 
@@ -44,6 +45,7 @@ Open **Updates** in the settings (the start settings).
 - **Close and update** (after a yes) closes Sync-Strata, updates it and starts it again. A window shows the progress (on Linux a terminal, or `SYNC_HOME/logs/update-<date>.log` when there is none). Chats and downloads stop.
 - Closing and updating works **from the PC's screen** only. A phone can check, nothing more.
 - When the place of new versions cannot be reached, it says why and shows the by-hand way (the folders to put the release zip in).
+  A zip in the Downloads folder is not used by itself (from 0.1.2). To use a downloaded zip, point to it: `update.cmd --source <zip>`.
 
 ### From the Start menu
 

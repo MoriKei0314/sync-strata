@@ -250,22 +250,54 @@ const why = (r) => `${r.status} ${(r.body && r.body.error && (r.body.error.kind 
 // end the turns of every agent waiting in the queue - the subagents included. HOLD_MIN (default 15) bounds the wait.
 const HOLD_MS = Number(process.env.HOLD_MIN || 15) * 60000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function strataUp() {
+// 11/19 0.1.2: "up" (the engine runs), "off" (the server answers but its engine is not running: it stopped - the watchdog
+// of #29, a crash - or was unloaded) or "down" (the server does not answer: stopped, or starting before it listens).
+async function strataState() {
   const r = await call("GET", "/metrics", null, 5000);
   const state = r.status === 200 && r.body && r.body.live && r.body.live.state;
-  return !!state && state !== "unloaded";
+  if (!state) return "down";
+  return state === "unloaded" ? "off" : "up";
 }
 const canHold = (job) => !job.gone && Date.now() - (job.holdSince ??= Date.now()) < HOLD_MS;
+// 11/19 0.1.2: the server starts a stopped engine again only when a request reaches it, so holding requests while it was
+// "off" kept the engine stopped for HOLD_MIN (the page stayed on "Strata 準備中" and no reply came, 0.1.1).  Now a request
+// is sent on when the engine is off - the server loads it first (requests wait their turn, so it is never started twice) -
+// at most LOAD_TRIES times per request; then the client gets an error instead of another start.  A warm-up is dropped
+// instead: it must not start an engine that may stop again, and the next real request starts it.
+const LOAD_TRIES = Number(process.env.LOAD_TRIES || 2);
+let holding = null;   // the job waiting here for Strata now (save-live does not wait for it: there is nothing to save)
 async function holdUntilUp(job) {
   let said = false;
   const t0 = Date.now();
-  while (!(await strataUp())) {
-    if (!canHold(job)) return false;
-    if (!said) { log(`#${job.n} held: Strata is not answering; waiting for it (up to ${HOLD_MS / 60000} min)`); said = true; }
-    await sleep(2000);
+  try {
+    for (;;) {
+      const st = await strataState();
+      if (st === "up") break;
+      if (st === "off") {
+        if (job.warm) return "drop";
+        if ((job.loads || 0) >= LOAD_TRIES) return "failed";
+        job.loads = (job.loads || 0) + 1;
+        log(`#${job.n} Strata's engine is not running: sending the request so that Strata starts it (${job.loads} of ${LOAD_TRIES})`);
+        return "load";
+      }
+      if (!canHold(job)) return "timeout";
+      holding = job;
+      if (!said) { log(`#${job.n} held: Strata is not answering; waiting for it (up to ${HOLD_MS / 60000} min)`); said = true; }
+      await sleep(2000);
+    }
+  } finally {
+    if (holding === job) holding = null;
   }
   if (said) log(`#${job.n} Strata answers again after ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-  return true;
+  return "up";
+}
+function failJob(job, message) {
+  const { res } = job;
+  job.started = true;
+  if (!res.headersSent) {
+    res.writeHead(503, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message, type: "server_error" } }));
+  } else res.end(sseError(message, 503));
 }
 
 async function slots(action, file) {
@@ -467,7 +499,18 @@ async function pump() {
     }
     if (job.warm) warming = job;
     for (;;) {
-      await holdUntilUp(job);     // gives up after HOLD_MIN: the request then fails as it did before
+      const h = await holdUntilUp(job);     // "timeout" after HOLD_MIN: the request then fails as it did before
+      if (h === "drop") {                   // 11/19 0.1.2: a warm-up never starts a stopped engine
+        stats.warms_dropped++;
+        log(`#${job.n} warm head dropped: Strata's engine is not running (the next request starts it)`);
+        break;
+      }
+      if (h === "failed") {                 // 11/19 0.1.2: started LOAD_TRIES times and it stopped again each time
+        log(`#${job.n} Strata's engine stopped again after ${LOAD_TRIES} starts: answering with an error`);
+        failJob(job, `Strata's engine stopped and did not stay up after ${LOAD_TRIES} starts. `
+          + "Close the app and open it again; if it happens again, see run\strata-auto.log (the engine's log).");
+        break;
+      }
       if (job.gone) break;
       try { await prepare(job); } catch (e) { log(`  prepare failed: ${e.stack || e.message}`); }
       if (job.gone) break;
@@ -547,9 +590,24 @@ function chat(req, res, body, warm = false) {
 // flight finishes first; requests that come meanwhile wait until the file is written.
 async function saveLive(res) {
   const t0 = Date.now();
-  while (busy && Date.now() - t0 < 120000) await sleep(200);
+  // 11/19 0.1.2: a warm-up is not worth waiting for (stopping waited up to 2 minutes for one), and a request waiting here for
+  // a stopped Strata has nothing to save: neither holds the stop
+  if (busy && warming && warming.cancel) {
+    log(`save-live: cancelling the warm-up #${warming.n}`);
+    warming.gone = true;
+    warming.cancel();
+  }
+  let notRunning = false, lastLook = 0;
+  while (busy && !holding && Date.now() - t0 < 120000) {
+    if (Date.now() - lastLook >= 2000) {           // the engine stopped or is starting again: no request is running in it
+      lastLook = Date.now();
+      if ((await strataState()) !== "up") { notRunning = true; break; }
+    }
+    await sleep(200);
+  }
   let out;
-  if (busy) out = { saved: false, why: "a request is still running" };
+  if (busy && (holding || notRunning)) out = { saved: false, why: "Strata is not running (a request is waiting for it)" };
+  else if (busy) out = { saved: false, why: "a request is still running" };
   else {
     busy = true;
     try {

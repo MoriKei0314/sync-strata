@@ -51,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import ssl
 import urllib.error
 import urllib.request
 import zipfile
@@ -117,13 +118,30 @@ def gh_path():
     return shutil.which('gh')
 
 
+_SSL = None
+
+
+def ssl_context():
+    """11/19 0.1.2: OS の証明書に，同梱の Python の certifi の証明書も足す．Windows の Python は OS が後から取り寄せる根の
+    証明書を取り寄せられず，GitHub に CERTIFICATE_VERIFY_FAILED になることがあった（届かない扱いになり，更新できなかった）"""
+    global _SSL
+    if _SSL is None:
+        _SSL = ssl.create_default_context()
+        try:
+            import certifi
+            _SSL.load_verify_locations(certifi.where())
+        except Exception:
+            pass
+    return _SSL
+
+
 def fetch(url, out, tmp):
     """url を out に落とす．URL で落ちなければ（GitHub のリリースが非公開のあいだは 404），gh があれば gh release download で．
     どちらもだめなら理由の文を返す（落ちたら None）"""
     why = []
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'sync-strata-update'})
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r, open(out + '.part', 'wb') as f:
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT, context=ssl_context()) as r, open(out + '.part', 'wb') as f:
             shutil.copyfileobj(r, f, 1 << 23)
         os.replace(out + '.part', out)
         return None
@@ -216,22 +234,21 @@ def latest_of(u):
 
 
 def zip_release(fn):
+    """11/19 0.1.2: 版は数を「.」でつないだ形（と「-」の後の英数字）だけ．「SyncStrata-0.1.1 (1).zip」（ブラウザーが同じ名前の
+    2 つ目に付ける名前）を版「0.1.1 (1)」と読んで 0.1.1 より新しいと見ていた（GitHub の Issue #1）"""
     m = re.match(r'^SyncStrata-(.+?)(-linux)?\.zip$', fn)
     if not m or bool(m.group(2)) == WIN:
+        return None
+    if not re.fullmatch(r'\d+(\.\d+)+(-[0-9A-Za-z]+)*', m.group(1)):
         return None
     return m.group(1)
 
 
 def download_dirs(here, app):
-    ds = [here, app, os.path.dirname(app), os.path.join(os.path.expanduser('~'), 'Downloads')]
-    if not WIN:
-        try:
-            for line in open(os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'), 'user-dirs.dirs'), encoding='utf-8'):
-                if line.startswith('XDG_DOWNLOAD_DIR='):
-                    ds.append(os.path.expandvars(line.split('=', 1)[1].strip().strip('"')))
-        except OSError:
-            pass
-        ds.append(os.path.expanduser('~/ダウンロード'))
+    """配布元に届かないとき，手で置いた配布物の zip を探す場所．11/19 0.1.2: ダウンロードのフォルダーは探さない（GitHub の
+    Issue #1: ブラウザーがほかの用で落とした名前の合うファイルを，確かめずに入れ替えの道具として流してしまう）．
+    ダウンロードのフォルダーの zip は --source で指す"""
+    ds = [here, app, os.path.dirname(app)]
     out = []
     for d in ds:
         if d and os.path.isdir(d) and os.path.abspath(d) not in out:

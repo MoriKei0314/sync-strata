@@ -457,7 +457,33 @@ def make_config(pick, engine, extra_env, context=None):
         # メモリー違反で落ちる．11/19 の Linux メイン機での切り分け）．カーネルを投げた後に終わるまで待つ
         # AMD_SERIALIZE_KERNEL=2 で毎回同じ返事になり，0・落ちが消えた（prefill +4〜5%，decode は下書きの当たりが上がり速くなった）．
         # 直すまでの避け方として既定に．--env AMD_SERIALIZE_KERNEL=0 で外せる
-        env.setdefault("AMD_SERIALIZE_KERNEL", "2")
+        # 11/19 0.1.2（本人「単体の Radeon の decode も出来る限りの対策を」）: Radeon は PCIe 越しに RAM の専門家を受け取るのが遅い
+        # （GitHub の Issue #2 の RX 9070 XT の方: decode の窓 63〜86 ms のうち 42〜64 ms が PCIe の分の待ち，自動の調整が 0.70→0.57→0.45 と
+        # 下げ続けていた）．自動の調整（STRATA_QL_PCIE_AUTO，0.199〜1.0）はそのまま働くので，始める値だけ 0.7 から 0.4 に下げる
+        if "--pcie-frac" in args and args[args.index("--pcie-frac") + 1] == "0.7":
+            setarg("--pcie-frac", "0.4")
+        # 11/19 0.1.2（本人の判断，確認箱）: RAM の専門家の置き場の取り方を起動時に測る STRATA_HIP_ARENA=auto（エンジン d278210e）は，
+        # 内蔵 Radeon では Windows・Linux とも古い中身の試験が判定できず切り替わらず，起動が 6〜10 秒延びた．効き目の見込みが立つまで
+        # 既定は今までどおりの取り方（coherent）．--env STRATA_HIP_ARENA=auto で試せる
+        env.setdefault("STRATA_HIP_ARENA", "coherent")
+        if os.name == "nt":
+            # 11/19 0.1.2（本人の決定）: Windows の Radeon は別の既定．GitHub の Issue #2 の RX 9070 XT（RDNA4）の方の切り分け:
+            # ① VMM（hipMemAddressReserve・hipMemMap）が全部失敗して起動できない（RX 9060 XT の方も同じ）→ STRATA_HIP_VMM=0
+            # （専門家の置き場は hipMalloc，K/V は固定の割り当て），② AMD_SERIALIZE_KERNEL=2 では最初の頼みでホストが固まり見張りも
+            # 働かない，=0 では層 1 の待ちで時間切れ → STRATA_QL_DMA_GPUFLAG=0（flag B をホストの関数で上げる）で解消．
+            # この 3 つで Sync-XS が動いた（相手の実機）．どれも --env で上書きできる
+            env.setdefault("AMD_SERIALIZE_KERNEL", "0")
+            env.setdefault("STRATA_HIP_VMM", "0")
+            # （STRATA_QL_DMA_GPUFLAG=0 は下で NVIDIA と一緒に．ひな形が "1" を持つので setdefault では効かなかった）
+        else:
+            env.setdefault("AMD_SERIALIZE_KERNEL", "2")
+    if os.name == "nt" and env.get("STRATA_QL_DMA_GPUFLAG") == "1":
+        # 11/19 0.1.2: Windows（WDDM）では，flag B を GPU のカーネルでコピーのストリームに上げる道（--pcie-mode dma ＋ STRATA_QL_DMA_GPUFLAG=1，
+        # ひな形の既定）が窓のグラフと待ち合い，最初の頼みで『verify: timed out at layer 1（#267）』→ エンジンが止まる PC がある
+        # （GitHub の Issue #2 の RTX 4060・RTX 4070・RX 9070 XT，X の RTX 4070 Ti．4070 Ti の方と RX 9070 XT の方が =0 で直ることを実機で確かめた．
+        # 係 R2 の読み: verify.cpp 3929 の raise_flagB）．=0 は flag B をホストで上げる．この PC（RTX 3080）の dchat（Sync-XS・R4・6 本）では
+        # 90.7 → 90.3 tok/s で差は揺れの範囲．Linux は今のまま．--env STRATA_QL_DMA_GPUFLAG=1 で前に戻せる
+        env["STRATA_QL_DMA_GPUFLAG"] = "0"
     for kv in extra_env:
         k, _, v = kv.partition("=")
         env[k] = v

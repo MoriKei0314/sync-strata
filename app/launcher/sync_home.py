@@ -289,6 +289,11 @@ def spec():
         if rows:
             best = max(rows, key=lambda r: float(r[1]))
             gpu, vram = best[0], round(float(best[1]) / 1024, 1)
+            if len(rows) > 1:     # 11/19 0.1.2: GPU が複数のときは，起動の道具が使う GPU（sync_env の選び）の値で勧める
+                import sync_env
+                g = sync_env.check()["gpu"]
+                if g.get("vendor") == "nvidia" and g.get("name"):
+                    gpu, vram = g["name"], float(g.get("vram_gib") or vram)
     except Exception:
         pass
     if not gpu:      # 11/16 S2: Radeon（nvidia-smi が無い）は対応環境の調べの値

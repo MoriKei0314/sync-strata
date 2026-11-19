@@ -118,9 +118,9 @@ TEXTS = {   # 鍵 → (英語, 日本語, 中国語)．{gpu} などは値で埋�
     "ram_low": ("This PC has only {ram_gib} GB of memory, so it may be slow (32 GB or more is recommended).",
                 "PC のメモリが {ram_gib} GB と少ないため、遅くなることがあります（32 GB 以上を推奨）。",
                 "电脑内存只有 {ram_gib} GB，可能较慢（建议 32 GB 以上）。"),
-    "no_avx512": ("This CPU has no AVX-512. It works, but expect it to be about 15-30% slower.",
-                  "この CPU は AVX-512 に対応していません。動きますが、15〜30% ほど遅くなる見込みです。",
-                  "此 CPU 不支持 AVX-512。可以运行，但预计会慢 15-30%。"),
+    "no_avx512": ("This CPU has no AVX-512. It works, but expect it to be about 10% slower.",
+                  "この CPU は AVX-512 に対応していません。動きますが、1 割ほど遅くなる見込みです。",
+                  "此 CPU 不支持 AVX-512。可以运行，但预计会慢约 10%。"),
 }
 
 
@@ -455,7 +455,11 @@ def check(facts=None):
     notes = [] if f.get("avx512", True) else [{"key": "no_avx512"}]
     return {"ok": not blockers, "blockers": blockers, "warnings": warnings, "notes": notes,
             "engine": eng, "gpu": {"name": name, "vendor": (g or {}).get("vendor"), "kind": kind,
-                                                              "vram_gib": (g or {}).get("vram_gib"), "engine": eng},
+                                                              "vram_gib": (g or {}).get("vram_gib"), "engine": eng,
+                                                              # 11/19 0.1.2: 選んだ NVIDIA の GPU の nvidia-smi の番号．前は返しておらず，
+                                                              # sync_launch の「選んだ GPU を先頭に・エンジンをその番号で」が働かず，
+                                                              # GPU が 2 枚の PC でいつも 0 番で動いた（4060＋3060 で 3060 を選んでも 4060）
+                                                              "index": (g or {}).get("index") if (g or {}).get("vendor") == "nvidia" else None},
             "facts": f}
 
 
